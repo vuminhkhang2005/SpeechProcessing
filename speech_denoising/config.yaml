@@ -1,0 +1,73 @@
+# Speech Denoising Configuration
+
+# Dataset paths
+data:
+  # Đường dẫn tới thư mục chứa VoiceBank + DEMAND dataset
+  train_clean_dir: "./data/clean_trainset_28spk_wav"
+  train_noisy_dir: "./data/noisy_trainset_28spk_wav"
+  test_clean_dir: "./data/clean_testset_wav"
+  test_noisy_dir: "./data/noisy_testset_wav"
+  
+  # Audio parameters
+  sample_rate: 16000
+  segment_length: 32000  # 2 seconds at 16kHz
+  
+# STFT parameters
+stft:
+  n_fft: 512
+  hop_length: 128
+  win_length: 512
+
+# Model parameters
+model:
+  name: "UNetDenoiser"
+  # Encoder channels
+  encoder_channels: [1, 32, 64, 128, 256, 512]
+  # Use attention in bottleneck
+  use_attention: true
+  # Dropout rate
+  dropout: 0.1
+
+# Training parameters
+training:
+  batch_size: 16
+  num_epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  # Learning rate scheduler
+  scheduler:
+    name: "ReduceLROnPlateau"
+    patience: 5
+    factor: 0.5
+    min_lr: 0.000001
+  # Early stopping
+  early_stopping_patience: 15
+  # Gradient clipping
+  grad_clip: 5.0
+  # Number of workers for data loading
+  num_workers: 4
+  # Mixed precision training
+  use_amp: true
+
+# Loss function
+loss:
+  # Combination of L1 and Multi-resolution STFT loss
+  l1_weight: 1.0
+  stft_weight: 1.0
+
+# Checkpoints and logging
+checkpoint:
+  save_dir: "./checkpoints"
+  save_every: 5  # Save every N epochs
+  keep_last: 3   # Keep last N checkpoints
+
+logging:
+  log_dir: "./logs"
+  log_every: 100  # Log every N steps
+
+# Evaluation
+eval:
+  output_dir: "./outputs"
+  # Calculate metrics
+  compute_pesq: true
+  compute_stoi: true
