@@ -1,10 +1,14 @@
 # Speech Denoising - Khử Nhiễu Tiếng Nói
 
-## Giới Thiệu
+## 🎵 Giới Thiệu
 
 Đây là dự án khử nhiễu tiếng nói (Speech Denoising) sử dụng Deep Learning. Mô hình được thiết kế để loại bỏ tiếng ồn nền và giữ lại giọng nói, tương tự như tính năng khử nhiễu của Discord.
 
-### Đặc điểm:
+### ✨ Đặc điểm:
+- **🖥️ Giao diện đồ họa (GUI)**: Ứng dụng hoàn chỉnh với tkinter, dễ sử dụng
+- **🎧 Phát audio trực tiếp**: Nghe và so sánh trước/sau khử nhiễu
+- **📊 Visualization**: Hiển thị spectrogram để so sánh
+- **📁 Batch Processing**: Xử lý nhiều file cùng lúc
 - **Kiến trúc U-Net**: Sử dụng encoder-decoder với skip connections để bảo toàn chi tiết
 - **Complex Ratio Mask (CRM)**: Xử lý cả magnitude và phase của tín hiệu
 - **Multi-Resolution STFT Loss**: Đảm bảo chất lượng âm thanh ở nhiều tần số
@@ -69,11 +73,14 @@ speech_denoising/
 
 ```
 speech_denoising/
+├── app.py                   # 🖥️ GUI Application (CHÍNH)
+├── run_app.py               # Script launcher cho GUI
 ├── config.yaml              # Cấu hình training
 ├── requirements.txt         # Dependencies
 ├── train.py                 # Script training
 ├── inference.py             # Script inference
 ├── evaluate.py              # Script đánh giá
+├── demo.py                  # Demo script
 ├── data/
 │   ├── __init__.py
 │   └── dataset.py           # Dataset loader
@@ -89,6 +96,105 @@ speech_denoising/
 ├── logs/                    # TensorBoard logs
 └── outputs/                 # Output audio files
 ```
+
+## 🖥️ Sử Dụng Ứng Dụng GUI (Khuyến Nghị)
+
+### Khởi động ứng dụng
+
+```bash
+cd speech_denoising
+python app.py
+```
+
+Hoặc sử dụng launcher script:
+
+```bash
+python run_app.py
+```
+
+### Giao diện ứng dụng
+
+Ứng dụng có 4 tab chính:
+
+#### 1. 🎤 Tab Khử Nhiễu (Denoise)
+- Chọn file audio đầu vào (WAV, MP3, FLAC, OGG)
+- Chọn đường dẫn file output
+- Bấm **"Khử Nhiễu"** để xử lý
+- Nghe và so sánh audio trước/sau
+- Xem spectrogram để so sánh trực quan
+
+#### 2. 📁 Tab Xử Lý Hàng Loạt (Batch Processing)
+- Chọn thư mục chứa các file audio nhiễu
+- Chọn thư mục đầu ra
+- Bấm **"Quét File"** để tìm tất cả audio files
+- Bấm **"Xử Lý Tất Cả"** để khử nhiễu hàng loạt
+
+#### 3. 🎓 Tab Huấn Luyện (Training)
+- Cấu hình đường dẫn dataset
+- Điều chỉnh tham số training
+- Theo dõi tiến trình training
+
+#### 4. ⚙️ Tab Cài Đặt (Settings)
+- **Quan trọng**: Tải model trước khi sử dụng!
+- Chọn file checkpoint (.pt)
+- Chọn device (CPU/CUDA)
+- Xem thông tin hệ thống
+
+### Yêu cầu thêm cho GUI
+
+```bash
+# Cài đặt sounddevice để phát audio
+pip install sounddevice
+
+# Linux: Cần cài PortAudio
+sudo apt-get install libportaudio2
+
+# Cài tkinter nếu chưa có
+# Ubuntu/Debian:
+sudo apt-get install python3-tk
+# Fedora:
+sudo dnf install python3-tkinter
+```
+
+### Screenshots
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 🎵 Speech Denoising Application                              │
+├─────────────────────────────────────────────────────────────┤
+│ [🎤 Khử Nhiễu] [📁 Xử Lý Hàng Loạt] [🎓 Huấn Luyện] [⚙️ Cài Đặt] │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  📂 File Đầu Vào                                             │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │ /path/to/noisy_audio.wav              [Chọn...]      │  │
+│  └──────────────────────────────────────────────────────┘  │
+│  [▶ Phát Input] [⏹ Dừng]                                    │
+│                                                             │
+│  💾 File Đầu Ra                                              │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │ /path/to/clean_audio.wav              [Chọn...]      │  │
+│  └──────────────────────────────────────────────────────┘  │
+│  [▶ Phát Output]                                            │
+│                                                             │
+│  ⚡ Xử Lý                                                    │
+│  [🎵 Khử Nhiễu] ████████████████████ Sẵn sàng               │
+│                                                             │
+│  📊 So Sánh Spectrogram                                      │
+│  ┌────────────────────────┐ ┌────────────────────────┐     │
+│  │                        │ │                        │     │
+│  │   Input (Nhiễu)        │ │  Output (Đã khử nhiễu) │     │
+│  │                        │ │                        │     │
+│  └────────────────────────┘ └────────────────────────┘     │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 💻 Sử Dụng Command Line
+
+Nếu bạn muốn sử dụng từ dòng lệnh thay vì GUI:
 
 ## Training
 
