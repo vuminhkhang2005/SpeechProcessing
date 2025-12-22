@@ -1,199 +1,200 @@
-# Speech Denoising – Khử Nhiễu Tiếng Nói
+# Speech Denoising
 
-## 🎵 Giới Thiệu
+A deep learning-based speech denoising system using U-Net architecture for removing background noise from audio recordings.
 
-Đây là dự án **khử nhiễu tiếng nói (Speech Denoising)** sử dụng **xử lý tín hiệu số và Deep Learning**.  
-Mục tiêu của dự án là loại bỏ **tiếng ồn nền** và giữ lại **giọng nói**, tương tự như cơ chế khử nhiễu của Discord.
+## Overview
 
-Dự án được thực hiện trong khuôn khổ **đồ án học phần Xử lý tiếng nói**, triển khai và huấn luyện trực tiếp trên máy cá nhân.
+This project implements a **speech enhancement/denoising** system that removes background noise while preserving speech quality. It uses a U-Net convolutional neural network operating on STFT spectrograms.
 
----
+### Key Features
 
-## ✨ Chức Năng Chính
+- **U-Net Architecture**: Encoder-decoder network with skip connections for preserving fine details
+- **Complex Ratio Mask (CRM)**: Applies learned masks to both real and imaginary STFT components
+- **Self-Attention**: Optional attention mechanism in the bottleneck for capturing long-range dependencies
+- **Multi-Resolution STFT Loss**: Combined L1 and spectral loss for better perceptual quality
+- **GUI Application**: User-friendly interface built with tkinter
+- **Real-time Demo**: Live microphone denoising capability
 
-- 🎧 Khử nhiễu tiếng nói từ file audio
-- 🖥️ Giao diện đồ họa (GUI) bằng `tkinter`
-- 📊 Hiển thị waveform và spectrogram trước / sau khử nhiễu
-- 📁 Xử lý nhiều file audio (batch processing)
-- 🎓 Huấn luyện mô hình Deep Learning
-- 📈 Đánh giá chất lượng bằng các metrics chuẩn (SNR, STOI, PESQ*)
+## Architecture
 
-> (*PESQ là tùy chọn, không bắt buộc cài trên Windows*)
+```
+Audio (noisy) → STFT → U-Net (Encoder → Bottleneck → Decoder) → Mask → iSTFT → Audio (clean)
+```
 
----
+The model processes complex STFT spectrograms (real + imaginary parts) and predicts a mask that is applied to enhance the speech signal.
 
-## 🧠 Phương Pháp & Pipeline
+### Model Details
 
-Pipeline xử lý tiếng nói của hệ thống:
+- **Input**: Complex STFT [batch, 2, freq, time]
+- **Encoder**: 5 stages with channels [32, 64, 128, 256, 512]
+- **Bottleneck**: 1024 channels with optional self-attention
+- **Decoder**: Mirrors encoder with skip connections
+- **Output**: Enhanced complex STFT (same shape as input)
+- **Parameters**: ~26M trainable parameters
 
-Audio (noisy)
-↓
-STFT
-↓
-Log-magnitude Spectrogram
-↓
-CNN Autoencoder (Speech Enhancement)
-↓
-Inverse STFT
-↓
-Audio (denoised)
+## Installation
 
-yaml
-Copy code
+### Requirements
 
-**Ý tưởng chính**:
-- Mô hình **không học trực tiếp waveform**
-- Chỉ học **biên độ phổ (magnitude)**
-- Phase của tín hiệu nhiễu được giữ nguyên khi tái tạo âm thanh
+- Python 3.8+
+- PyTorch 1.9+
+- CUDA (optional, for GPU acceleration)
 
----
-
-## 📚 Dataset
-
-### VoiceBank + DEMAND
-
-Dataset được sử dụng rộng rãi trong nghiên cứu Speech Enhancement.
-
-- Clean speech: **VoiceBank**
-- Noise: **DEMAND**
-- Sample rate: **16 kHz**
-
-📥 Link dataset:  
-https://datashare.ed.ac.uk/handle/10283/2791
-
-### Cấu trúc thư mục sau khi giải nén:
-
-speech_denoising/
-├── data/
-│ ├── clean_trainset_28spk_wav/
-│ ├── noisy_trainset_28spk_wav/
-│ ├── clean_testset_wav/
-│ └── noisy_testset_wav/
-
-yaml
-Copy code
-
-⚠️ **Dataset không được push lên GitHub** (đã ignore bằng `.gitignore`).
-
----
-
-## 📂 Cấu Trúc Dự Án
-
-speech_denoising/
-├── app.py # GUI chính
-├── run_app.py # Launcher GUI
-├── config.yaml # Cấu hình training
-├── train.py # Training script
-├── inference.py # Khử nhiễu audio
-├── evaluate.py # Đánh giá mô hình
-├── demo.py # Demo nhanh
-├── data/
-│ └── dataset.py # Dataset loader
-├── models/
-│ ├── autoencoder.py # CNN Autoencoder
-│ └── loss.py # Loss functions
-├── utils/
-│ ├── audio_utils.py
-│ └── metrics.py
-├── requirements.txt
-├── README.md
-└── .gitignore
-
-yaml
-Copy code
-
----
-
-## 🖥️ Hướng Dẫn Chạy GUI
-
-### 1️⃣ Cài dependencies
+### Setup
 
 ```bash
+# Clone the repository
+git clone <repo-url>
+cd speech_denoising
+
+# Install dependencies
 pip install -r requirements.txt
-2️⃣ Chạy ứng dụng
-bash
-Copy code
-python app.py
-Hoặc:
+```
 
-bash
-Copy code
-python run_app.py
-🎓 Training Mô Hình
-Train với cấu hình mặc định
-bash
-Copy code
+## Dataset
+
+This project uses the **VoiceBank + DEMAND** dataset, widely used in speech enhancement research.
+
+- **Clean speech**: VoiceBank corpus
+- **Noise**: DEMAND database
+- **Sample rate**: 16 kHz
+
+### Download
+
+Download from: https://datashare.ed.ac.uk/handle/10283/2791
+
+### Directory Structure
+
+After downloading, organize the data as follows:
+
+```
+speech_denoising/
+└── data/
+    ├── clean_trainset_28spk_wav/
+    ├── noisy_trainset_28spk_wav/
+    ├── clean_testset_wav/
+    └── noisy_testset_wav/
+```
+
+## Usage
+
+### Training
+
+Train the model with default configuration:
+
+```bash
 python train.py --config config.yaml
-Resume training
-bash
-Copy code
-python train.py \
-  --config config.yaml \
-  --resume checkpoints/model_epoch_20.pt
-📊 Đánh Giá Mô Hình
-bash
-Copy code
-python evaluate.py \
-  --config config.yaml \
-  --checkpoint checkpoints/best_model.pt
-Metrics sử dụng:
-Metric	Ý nghĩa
-SNR	Signal-to-Noise Ratio
-STOI	Độ dễ hiểu của tiếng nói
-PESQ*	Chất lượng cảm nhận
+```
 
-⚙️ Cấu Hình (config.yaml – ví dụ)
-yaml
-Copy code
+Resume training from a checkpoint:
+
+```bash
+python train.py --config config.yaml --resume checkpoints/model_epoch_20.pt
+```
+
+### Inference
+
+Denoise a single audio file:
+
+```bash
+python inference.py --input noisy_audio.wav --output clean_audio.wav --checkpoint checkpoints/best_model.pt
+```
+
+### Evaluation
+
+Evaluate model performance on the test set:
+
+```bash
+python evaluate.py --config config.yaml --checkpoint checkpoints/best_model.pt
+```
+
+**Metrics:**
+| Metric | Description |
+|--------|-------------|
+| SNR | Signal-to-Noise Ratio |
+| STOI | Short-Time Objective Intelligibility |
+| PESQ | Perceptual Evaluation of Speech Quality (optional) |
+
+### GUI Application
+
+Launch the graphical interface:
+
+```bash
+python app.py
+# or
+python run_app.py
+```
+
+Features:
+- Load and process audio files
+- Visualize waveforms and spectrograms
+- Compare before/after denoising
+- Batch processing support
+
+### Real-time Demo
+
+Run real-time denoising with microphone input:
+
+```bash
+python realtime_demo.py
+```
+
+## Configuration
+
+Edit `config.yaml` to customize training parameters:
+
+```yaml
 data:
   sample_rate: 16000
-  segment_length: 32000   # 2 giây
+  segment_length: 32000  # 2 seconds
 
 stft:
   n_fft: 512
   hop_length: 128
   win_length: 512
 
+model:
+  name: "UNetDenoiser"
+  encoder_channels: [32, 64, 128, 256, 512]
+  use_attention: true
+  dropout: 0.1
+
 training:
   batch_size: 16
-  num_epochs: 30
+  num_epochs: 100
   learning_rate: 0.0001
-🚀 Ghi Chú Kỹ Thuật
-Huấn luyện trên CPU laptop
+```
 
-Mô hình nhẹ (~1–3M parameters)
+## Project Structure
 
-Thời gian train: ~2–4 giờ
+```
+speech_denoising/
+├── app.py              # GUI application
+├── run_app.py          # GUI launcher
+├── train.py            # Training script
+├── inference.py        # Single-file inference
+├── evaluate.py         # Model evaluation
+├── demo.py             # Quick demo script
+├── realtime_demo.py    # Real-time microphone demo
+├── config.yaml         # Configuration file
+├── models/
+│   ├── __init__.py
+│   ├── unet.py         # U-Net model architecture
+│   └── loss.py         # Loss functions
+├── utils/
+│   ├── __init__.py
+│   ├── audio_utils.py  # Audio processing utilities
+│   └── metrics.py      # Evaluation metrics
+├── requirements.txt
+└── README.md
+```
 
-Phù hợp cho đồ án học phần
+## Notes
 
-👥 Làm Việc Nhóm
-Branch chính: main
+- **PESQ Installation**: PESQ requires C compilation. On Windows, install Microsoft Visual C++ Build Tools. The system works without PESQ if unavailable.
+- **GPU Training**: Recommended for faster training. Enable with CUDA-compatible GPU.
+- **Training Time**: ~2-4 hours on CPU, significantly faster on GPU.
 
-Mỗi thành viên làm việc trên feature/*
+## License
 
-Merge vào main thông qua Pull Request
-
-📖 Tài Liệu Tham Khảo
-VoiceBank + DEMAND Dataset
-
-U-Net for Speech Enhancement
-
-Speech Enhancement using Autoencoder
-
-Multi-Resolution STFT Loss
-
-📜 License
 MIT License
-
-yaml
-Copy code
-
----
-
-## ✅ VIỆC BẠN CẦN LÀM NGAY
-
-```bash
-git add README.md
-git commit -m "resolve README conflict"
-git push

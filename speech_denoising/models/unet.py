@@ -97,18 +97,21 @@ class DecoderBlock(nn.Module):
     def __init__(
         self,
         in_channels: int,
+        skip_channels: int,
         out_channels: int,
         kernel_size: int = 3,
         dropout: float = 0.0
     ):
         super().__init__()
         
+        # Upsample to out_channels
         self.upsample = nn.ConvTranspose2d(
-            in_channels, in_channels // 2, kernel_size=2, stride=2
+            in_channels, out_channels, kernel_size=2, stride=2
         )
         
+        # After concat: out_channels + skip_channels
         self.conv1 = ConvBlock(
-            in_channels, out_channels, kernel_size,
+            out_channels + skip_channels, out_channels, kernel_size,
             padding=kernel_size // 2, dropout=dropout
         )
         self.conv2 = ConvBlock(
@@ -214,33 +217,40 @@ class UNetDenoiser(nn.Module):
         
         # Bottleneck with attention
         bottleneck_channels = encoder_channels[-1]
+        self.bottleneck_out_channels = bottleneck_channels * 2
         self.bottleneck = nn.Sequential(
-            ConvBlock(bottleneck_channels, bottleneck_channels * 2, 3, padding=1),
-            ConvBlock(bottleneck_channels * 2, bottleneck_channels, 3, padding=1)
+            ConvBlock(bottleneck_channels, self.bottleneck_out_channels, 3, padding=1),
+            ConvBlock(self.bottleneck_out_channels, self.bottleneck_out_channels, 3, padding=1)
         )
         
         if use_attention:
-            self.attention = AttentionBlock(bottleneck_channels)
+            self.attention = AttentionBlock(self.bottleneck_out_channels)
         else:
             self.attention = None
         
         # Decoder
         self.decoders = nn.ModuleList()
-        decoder_channels = encoder_channels[::-1]  # Reverse
+        decoder_channels = encoder_channels[::-1]  # Reverse: [512, 256, 128, 64, 32]
+        decoder_in_channels = self.bottleneck_out_channels  # Start with bottleneck output
+        
         for i in range(len(decoder_channels) - 1):
+            skip_ch = decoder_channels[i]  # Skip connection channels
+            dec_out_ch = decoder_channels[i + 1]  # Output channels for this decoder
             self.decoders.append(
                 DecoderBlock(
-                    decoder_channels[i] * 2,  # Skip connection doubles channels
-                    decoder_channels[i + 1],
+                    in_channels=decoder_in_channels,
+                    skip_channels=skip_ch,
+                    out_channels=dec_out_ch,
                     dropout=dropout
                 )
             )
+            decoder_in_channels = dec_out_ch  # Next decoder input = current output
         
         # Output layer
         self.output_conv = nn.Sequential(
             nn.Conv2d(encoder_channels[0], encoder_channels[0], 3, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(encoder_channels[0], out_channels, 1)
+            nn.Conv2d(encoder_channels[0], self.out_channels, 1)
         )
         
         # Mask activation based on mask type
