@@ -2,8 +2,11 @@
 # Python 3.8+ recommended
 
 # Deep Learning Framework
-torch>=2.0.0
-torchaudio>=2.0.0
+# NOTE: torch, torchvision, and torchaudio versions must be compatible.
+# See https://pytorch.org/get-started/previous-versions/ for version compatibility.
+torch==2.9.0
+torchvision==0.24.0
+torchaudio==2.9.0
 
 # Audio Processing
 librosa>=0.10.0
