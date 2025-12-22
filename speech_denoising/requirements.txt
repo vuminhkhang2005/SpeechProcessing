@@ -34,3 +34,20 @@ hydra-core>=1.3.0
 
 # For downloading dataset
 requests>=2.31.0
+
+# ===============================
+# GUI Application Dependencies
+# ===============================
+
+# Audio playback for GUI
+# NOTE: sounddevice requires PortAudio to be installed on your system
+# Linux: sudo apt-get install libportaudio2
+# macOS: brew install portaudio
+# Windows: Usually works out of the box
+sounddevice>=0.4.6
+
+# tkinter is included with Python, but you may need to install it separately:
+# Linux (Ubuntu/Debian): sudo apt-get install python3-tk
+# Linux (Fedora): sudo dnf install python3-tkinter
+# macOS: Usually included with Python from python.org
+# Windows: Included with standard Python installation
