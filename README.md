@@ -2,6 +2,8 @@
 
 A deep learning-based speech denoising system using U-Net architecture for removing background noise from audio recordings.
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_USERNAME/speech_denoising/blob/main/train_colab.ipynb)
+
 ## Overview
 
 This project implements a **speech enhancement/denoising** system that removes background noise while preserving speech quality. It uses a U-Net convolutional neural network operating on STFT spectrograms.
@@ -92,6 +94,27 @@ Resume training from a checkpoint:
 python train.py --config config.yaml --resume checkpoints/model_epoch_20.pt
 ```
 
+### 🚀 Train on Google Colab (Recommended)
+
+Train the model for free on Google Colab with GPU acceleration:
+
+1. **Open the notebook**: Click the "Open in Colab" badge at the top of this README, or upload `train_colab.ipynb` to Google Colab
+
+2. **Enable GPU**: Go to `Runtime` → `Change runtime type` → Select `GPU`
+
+3. **Run all cells**: The notebook will:
+   - Install dependencies
+   - Download the VoiceBank + DEMAND dataset (~3.3 GB)
+   - Train the model for 50 epochs (~1-2 hours)
+   - Save the best model
+
+4. **Download your model**: After training, download `best_model.pt` to use locally
+
+**Colab Tips:**
+- Use Google Drive to persist data between sessions
+- Batch size is reduced to 8 for Colab GPU memory constraints
+- Training for 50 epochs is a good starting point; increase for better results
+
 ### Inference
 
 Denoise a single audio file:
@@ -172,11 +195,16 @@ speech_denoising/
 ├── app.py              # GUI application
 ├── run_app.py          # GUI launcher
 ├── train.py            # Training script
+├── train_colab.ipynb   # Google Colab training notebook
 ├── inference.py        # Single-file inference
 ├── evaluate.py         # Model evaluation
 ├── demo.py             # Quick demo script
 ├── realtime_demo.py    # Real-time microphone demo
 ├── config.yaml         # Configuration file
+├── download_dataset.py # Dataset download helper
+├── data/
+│   ├── __init__.py
+│   └── dataset.py      # Dataset classes and dataloaders
 ├── models/
 │   ├── __init__.py
 │   ├── unet.py         # U-Net model architecture
