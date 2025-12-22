@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from data.dataset import VoiceBankDEMANDDataset
 from models.unet import UNetDenoiser
 from utils.audio_utils import AudioProcessor, save_audio
-from utils.metrics import calculate_pesq, calculate_stoi, calculate_si_sdr, calculate_snr
+from utils.metrics import calculate_pesq, calculate_stoi, calculate_si_sdr, calculate_snr, is_pesq_available
 
 
 class Evaluator:
@@ -123,18 +123,21 @@ class Evaluator:
         metrics = {}
         
         # Enhanced vs Clean
-        metrics['pesq'] = calculate_pesq(clean_wav, enhanced_wav, self.sample_rate)
         metrics['stoi'] = calculate_stoi(clean_wav, enhanced_wav, self.sample_rate)
         metrics['si_sdr'] = calculate_si_sdr(clean_wav, enhanced_wav)
         metrics['snr'] = calculate_snr(clean_wav, enhanced_wav)
         
         # Noisy vs Clean (baseline)
-        metrics['pesq_noisy'] = calculate_pesq(clean_wav, noisy_wav, self.sample_rate)
         metrics['stoi_noisy'] = calculate_stoi(clean_wav, noisy_wav, self.sample_rate)
         metrics['si_sdr_noisy'] = calculate_si_sdr(clean_wav, noisy_wav)
         
+        # PESQ (only if available)
+        if is_pesq_available():
+            metrics['pesq'] = calculate_pesq(clean_wav, enhanced_wav, self.sample_rate)
+            metrics['pesq_noisy'] = calculate_pesq(clean_wav, noisy_wav, self.sample_rate)
+            metrics['pesq_improvement'] = metrics['pesq'] - metrics['pesq_noisy']
+        
         # Improvement
-        metrics['pesq_improvement'] = metrics['pesq'] - metrics['pesq_noisy']
         metrics['stoi_improvement'] = metrics['stoi'] - metrics['stoi_noisy']
         metrics['si_sdr_improvement'] = metrics['si_sdr'] - metrics['si_sdr_noisy']
         
@@ -197,32 +200,46 @@ class Evaluator:
         print("EVALUATION RESULTS")
         print("=" * 60)
         
-        metrics = ['pesq', 'stoi', 'si_sdr', 'snr']
+        # Determine available metrics
+        metrics = ['stoi', 'si_sdr', 'snr']
+        if 'pesq' in df.columns:
+            metrics.insert(0, 'pesq')
         
         print("\nEnhanced Speech Metrics:")
         print("-" * 40)
         for metric in metrics:
-            mean_val = df[metric].mean()
-            std_val = df[metric].std()
-            print(f"  {metric.upper():>10}: {mean_val:.4f} ± {std_val:.4f}")
+            if metric in df.columns:
+                mean_val = df[metric].mean()
+                std_val = df[metric].std()
+                print(f"  {metric.upper():>10}: {mean_val:.4f} ± {std_val:.4f}")
         
         print("\nNoisy Speech Metrics (Baseline):")
         print("-" * 40)
-        for metric in ['pesq_noisy', 'stoi_noisy', 'si_sdr_noisy']:
-            mean_val = df[metric].mean()
-            std_val = df[metric].std()
-            name = metric.replace('_noisy', '').upper()
-            print(f"  {name:>10}: {mean_val:.4f} ± {std_val:.4f}")
+        noisy_metrics = ['stoi_noisy', 'si_sdr_noisy']
+        if 'pesq_noisy' in df.columns:
+            noisy_metrics.insert(0, 'pesq_noisy')
+        for metric in noisy_metrics:
+            if metric in df.columns:
+                mean_val = df[metric].mean()
+                std_val = df[metric].std()
+                name = metric.replace('_noisy', '').upper()
+                print(f"  {name:>10}: {mean_val:.4f} ± {std_val:.4f}")
         
         print("\nImprovement:")
         print("-" * 40)
-        for metric in ['pesq_improvement', 'stoi_improvement', 'si_sdr_improvement']:
-            mean_val = df[metric].mean()
-            name = metric.replace('_improvement', '').upper()
-            print(f"  Δ{name:>9}: {mean_val:+.4f}")
+        improvement_metrics = ['stoi_improvement', 'si_sdr_improvement']
+        if 'pesq_improvement' in df.columns:
+            improvement_metrics.insert(0, 'pesq_improvement')
+        for metric in improvement_metrics:
+            if metric in df.columns:
+                mean_val = df[metric].mean()
+                name = metric.replace('_improvement', '').upper()
+                print(f"  Δ{name:>9}: {mean_val:+.4f}")
         
         print("\n" + "=" * 60)
         print(f"Total samples evaluated: {len(df)}")
+        if not is_pesq_available():
+            print("Note: PESQ not available. Install with: pip install pesq")
         print("=" * 60)
 
 

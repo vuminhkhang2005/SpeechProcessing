@@ -10,6 +10,18 @@ import warnings
 # Suppress warnings from PESQ
 warnings.filterwarnings('ignore')
 
+# Check if PESQ is available
+try:
+    from pesq import pesq as pesq_func
+    PESQ_AVAILABLE = True
+except ImportError:
+    PESQ_AVAILABLE = False
+    print("Warning: PESQ not installed. PESQ metric will not be available.")
+    print("To install PESQ on Windows:")
+    print("  1. Install Visual C++ Build Tools: https://visualstudio.microsoft.com/visual-cpp-build-tools/")
+    print("  2. pip install pesq")
+    print("Training and inference will still work without PESQ.\n")
+
 
 def calculate_snr(clean: np.ndarray, enhanced: np.ndarray) -> float:
     """
@@ -46,17 +58,18 @@ def calculate_pesq(
         mode: 'wb' for wideband, 'nb' for narrowband
     
     Returns:
-        PESQ score (-0.5 to 4.5)
+        PESQ score (-0.5 to 4.5), or 0.0 if PESQ not available
     """
+    if not PESQ_AVAILABLE:
+        return 0.0
+    
     try:
-        from pesq import pesq
-        
         # Ensure same length
         min_len = min(len(clean), len(enhanced))
         clean = clean[:min_len]
         enhanced = enhanced[:min_len]
         
-        score = pesq(sample_rate, clean, enhanced, mode)
+        score = pesq_func(sample_rate, clean, enhanced, mode)
         return score
     except Exception as e:
         print(f"PESQ calculation failed: {e}")
@@ -142,7 +155,7 @@ def evaluate_batch(
         clean_batch: Batch of clean audio [batch, samples]
         enhanced_batch: Batch of enhanced audio [batch, samples]
         sample_rate: Sample rate
-        compute_pesq: Calculate PESQ
+        compute_pesq: Calculate PESQ (only if PESQ is installed)
         compute_stoi: Calculate STOI
     
     Returns:
@@ -164,7 +177,8 @@ def evaluate_batch(
         'si_sdr': []
     }
     
-    if compute_pesq:
+    # Only compute PESQ if available and requested
+    if compute_pesq and PESQ_AVAILABLE:
         metrics['pesq'] = []
     if compute_stoi:
         metrics['stoi'] = []
@@ -176,7 +190,7 @@ def evaluate_batch(
         metrics['snr'].append(calculate_snr(clean, enhanced))
         metrics['si_sdr'].append(calculate_si_sdr(clean, enhanced))
         
-        if compute_pesq:
+        if compute_pesq and PESQ_AVAILABLE:
             metrics['pesq'].append(calculate_pesq(clean, enhanced, sample_rate))
         if compute_stoi:
             metrics['stoi'].append(calculate_stoi(clean, enhanced, sample_rate))
@@ -185,3 +199,8 @@ def evaluate_batch(
     avg_metrics = {k: np.mean(v) for k, v in metrics.items()}
     
     return avg_metrics
+
+
+def is_pesq_available() -> bool:
+    """Check if PESQ is available"""
+    return PESQ_AVAILABLE

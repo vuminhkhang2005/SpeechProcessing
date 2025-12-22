@@ -14,9 +14,14 @@ scipy>=1.10.0
 numpy>=1.24.0
 pandas>=2.0.0
 
-# Metrics
-pesq>=0.0.4
+# Metrics (STOI - dễ cài đặt)
 pystoi>=0.3.3
+
+# PESQ - Optional (khó cài trên Windows)
+# Nếu muốn dùng PESQ trên Windows:
+# 1. Cài Visual C++ Build Tools: https://visualstudio.microsoft.com/visual-cpp-build-tools/
+# 2. pip install pesq
+# Hoặc bỏ qua - code vẫn chạy được mà không cần PESQ
 
 # Visualization
 matplotlib>=3.7.0

@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from data.dataset import VoiceBankDEMANDDataset, create_dataloaders
 from models.unet import UNetDenoiser
 from models.loss import DenoiserLoss
-from utils.metrics import evaluate_batch
+from utils.metrics import evaluate_batch, is_pesq_available
 from utils.audio_utils import AudioProcessor
 
 
@@ -223,12 +223,15 @@ class Trainer:
         """Validate on validation set"""
         self.model.eval()
         val_losses = {'total_loss': 0.0, 'complex_loss': 0.0, 'magnitude_loss': 0.0}
-        metrics = {'pesq': 0.0, 'stoi': 0.0, 'si_sdr': 0.0}
+        metrics = {'stoi': 0.0, 'si_sdr': 0.0}
         num_batches = 0
         
         eval_cfg = self.config.get('eval', {})
-        compute_pesq = eval_cfg.get('compute_pesq', True)
+        compute_pesq = eval_cfg.get('compute_pesq', True) and is_pesq_available()
         compute_stoi = eval_cfg.get('compute_stoi', True)
+        
+        if compute_pesq:
+            metrics['pesq'] = 0.0
         
         for batch in tqdm(self.val_loader, desc="Validating"):
             noisy_stft = batch['noisy_stft'].to(self.device)
