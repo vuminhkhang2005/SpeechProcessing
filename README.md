@@ -61,11 +61,9 @@ This project uses the **VoiceBank + DEMAND** dataset, widely used in speech enha
 - **Noise**: DEMAND database
 - **Sample rate**: 16 kHz
 
-### Download
+### Option 1: Local Download
 
 Download from: https://datashare.ed.ac.uk/handle/10283/2791
-
-### Directory Structure
 
 After downloading, organize the data as follows:
 
@@ -76,6 +74,30 @@ speech_denoising/
     ├── noisy_trainset_28spk_wav/
     ├── clean_testset_wav/
     └── noisy_testset_wav/
+```
+
+### Option 2: Google Drive (for Colab)
+
+Upload your dataset to Google Drive with this structure:
+
+```
+My Drive/
+└── datasets/                          # Your dataset folder
+    ├── clean_trainset_28spk_wav/      # 11,572 .wav files
+    ├── noisy_trainset_28spk_wav/      # 11,572 .wav files
+    ├── clean_testset_wav/             # 824 .wav files
+    └── noisy_testset_wav/             # 824 .wav files
+```
+
+Then use in Colab:
+```python
+from data.dataset import setup_gdrive_dataset, create_dataloaders
+
+# Setup dataset from Google Drive
+paths = setup_gdrive_dataset(gdrive_path='/content/drive/MyDrive/datasets')
+
+# Create dataloaders
+train_loader, val_loader = create_dataloaders(**paths)
 ```
 
 ## Usage
@@ -94,24 +116,36 @@ Resume training from a checkpoint:
 python train.py --config config.yaml --resume checkpoints/model_epoch_20.pt
 ```
 
-### 🚀 Train on Google Colab (Recommended)
+### 🚀 Train on Google Colab with Google Drive Dataset (Recommended)
 
-Train the model for free on Google Colab with GPU acceleration:
+Train the model for free on Google Colab with GPU acceleration, using your dataset from Google Drive:
 
-1. **Open the notebook**: Click the "Open in Colab" badge at the top of this README, or upload `train_colab.ipynb` to Google Colab
+1. **Upload dataset to Google Drive**: Upload the VoiceBank + DEMAND dataset to your Google Drive (see Dataset section above)
 
-2. **Enable GPU**: Go to `Runtime` → `Change runtime type` → Select `GPU`
+2. **Open the notebook**: Click the "Open in Colab" badge at the top of this README, or upload `train_colab.ipynb` to Google Colab
 
-3. **Run all cells**: The notebook will:
-   - Install dependencies
-   - Download the VoiceBank + DEMAND dataset (~3.3 GB)
+3. **Enable GPU**: Go to `Runtime` → `Change runtime type` → Select `GPU`
+
+4. **Configure dataset path**: In the notebook, set your Google Drive dataset path:
+   ```python
+   GDRIVE_DATASET_PATH = "/content/drive/MyDrive/datasets"  # Your path
+   ```
+
+5. **Run all cells**: The notebook will:
+   - Mount Google Drive automatically
+   - Load dataset directly from Drive (no download needed!)
    - Train the model for 50 epochs (~1-2 hours)
    - Save the best model
 
-4. **Download your model**: After training, download `best_model.pt` to use locally
+6. **Save model to Drive**: The trained model can be saved back to Google Drive for persistent storage
+
+**Benefits of Google Drive Dataset:**
+- ✅ No need to re-download dataset each session
+- ✅ Dataset persists across Colab sessions
+- ✅ Faster startup time
+- ✅ Save trained models to Drive
 
 **Colab Tips:**
-- Use Google Drive to persist data between sessions
 - Batch size is reduced to 8 for Colab GPU memory constraints
 - Training for 50 epochs is a good starting point; increase for better results
 

@@ -1,7 +1,21 @@
 # Speech Denoising Configuration
 
 # Dataset paths
+# Option 1: Local paths (default)
+# Option 2: Google Drive paths (for Colab) - set use_gdrive: true
 data:
+  # Set to true to use Google Drive dataset (for Google Colab)
+  use_gdrive: false
+  
+  # Google Drive settings (only used if use_gdrive: true)
+  gdrive:
+    # Path to dataset folder in Google Drive
+    # Example: /content/drive/MyDrive/datasets
+    path: "/content/drive/MyDrive/datasets"
+    # Or use folder ID from the Drive URL (alternative)
+    # folder_id: "1mDHfxtzvC-7kw0YXF0dFAcYlh7GAb2-"
+  
+  # Local paths (used if use_gdrive: false)
   # Đường dẫn tới thư mục chứa VoiceBank + DEMAND dataset
   train_clean_dir: "./data/clean_trainset_28spk_wav"
   train_noisy_dir: "./data/noisy_trainset_28spk_wav"

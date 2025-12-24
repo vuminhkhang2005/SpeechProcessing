@@ -415,6 +415,12 @@ def main():
     parser.add_argument('--lr', type=float, default=None)
     parser.add_argument('--device', type=str, default=None)
     
+    # Google Drive options
+    parser.add_argument('--gdrive', action='store_true',
+                        help='Use Google Drive dataset (for Colab)')
+    parser.add_argument('--gdrive_path', type=str, default=None,
+                        help='Path to dataset in Google Drive')
+    
     args = parser.parse_args()
     
     # Load config
@@ -428,6 +434,13 @@ def main():
         config['training']['num_epochs'] = args.epochs
     if args.lr is not None:
         config['training']['learning_rate'] = args.lr
+    
+    # Override Google Drive settings
+    if args.gdrive:
+        config['data']['use_gdrive'] = True
+    if args.gdrive_path:
+        config['data']['gdrive'] = config['data'].get('gdrive', {})
+        config['data']['gdrive']['path'] = args.gdrive_path
     
     # Device
     if args.device is not None:
@@ -447,23 +460,60 @@ def main():
     stft_cfg = config['stft']
     
     try:
-        train_loader, val_loader = create_dataloaders(
-            train_clean_dir=data_cfg['train_clean_dir'],
-            train_noisy_dir=data_cfg['train_noisy_dir'],
-            test_clean_dir=data_cfg['test_clean_dir'],
-            test_noisy_dir=data_cfg['test_noisy_dir'],
-            sample_rate=data_cfg['sample_rate'],
-            segment_length=data_cfg['segment_length'],
-            batch_size=config['training']['batch_size'],
-            num_workers=config['training']['num_workers'],
-            n_fft=stft_cfg['n_fft'],
-            hop_length=stft_cfg['hop_length'],
-            win_length=stft_cfg['win_length']
-        )
+        # Check if using Google Drive
+        use_gdrive = data_cfg.get('use_gdrive', False)
+        
+        if use_gdrive:
+            from data.dataset import setup_gdrive_dataset
+            
+            gdrive_cfg = data_cfg.get('gdrive', {})
+            gdrive_path = gdrive_cfg.get('path')
+            gdrive_folder_id = gdrive_cfg.get('folder_id')
+            
+            print("📂 Using Google Drive dataset...")
+            paths = setup_gdrive_dataset(
+                gdrive_path=gdrive_path,
+                gdrive_folder_id=gdrive_folder_id
+            )
+            
+            if not paths:
+                print("❌ Failed to setup Google Drive dataset.")
+                return
+            
+            train_loader, val_loader = create_dataloaders(
+                train_clean_dir=paths['train_clean_dir'],
+                train_noisy_dir=paths['train_noisy_dir'],
+                test_clean_dir=paths['test_clean_dir'],
+                test_noisy_dir=paths['test_noisy_dir'],
+                sample_rate=data_cfg['sample_rate'],
+                segment_length=data_cfg['segment_length'],
+                batch_size=config['training']['batch_size'],
+                num_workers=config['training']['num_workers'],
+                n_fft=stft_cfg['n_fft'],
+                hop_length=stft_cfg['hop_length'],
+                win_length=stft_cfg['win_length']
+            )
+        else:
+            # Use local paths
+            train_loader, val_loader = create_dataloaders(
+                train_clean_dir=data_cfg['train_clean_dir'],
+                train_noisy_dir=data_cfg['train_noisy_dir'],
+                test_clean_dir=data_cfg['test_clean_dir'],
+                test_noisy_dir=data_cfg['test_noisy_dir'],
+                sample_rate=data_cfg['sample_rate'],
+                segment_length=data_cfg['segment_length'],
+                batch_size=config['training']['batch_size'],
+                num_workers=config['training']['num_workers'],
+                n_fft=stft_cfg['n_fft'],
+                hop_length=stft_cfg['hop_length'],
+                win_length=stft_cfg['win_length']
+            )
     except Exception as e:
         print(f"Error loading dataset: {e}")
-        print("\nPlease make sure you have downloaded the VoiceBank + DEMAND dataset.")
-        print("Run: python -c \"from data.dataset import download_voicebank_demand; download_voicebank_demand()\"")
+        print("\nPlease make sure you have the VoiceBank + DEMAND dataset available.")
+        print("Options:")
+        print("  1. Download to local './data/' folder (see: python download_dataset.py)")
+        print("  2. Use Google Drive: python train.py --gdrive --gdrive_path '/content/drive/MyDrive/datasets'")
         return
     
     # Create model
