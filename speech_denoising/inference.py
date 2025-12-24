@@ -19,7 +19,6 @@ from typing import Optional
 import time
 
 import torch
-import torchaudio
 import numpy as np
 from tqdm import tqdm
 

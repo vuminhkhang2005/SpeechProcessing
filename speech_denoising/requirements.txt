@@ -2,24 +2,28 @@
 # Python 3.8+ recommended
 
 # Deep Learning Framework
-# NOTE: torch, torchvision, and torchaudio versions must be compatible.
+# NOTE: This project uses librosa for audio loading (Google Colab compatible).
+# torchaudio is NOT required.
+#
 # See https://pytorch.org/get-started/previous-versions/ for version compatibility.
 # IMPORTANT: Install PyTorch packages together using the same index URL to ensure
 # CUDA version compatibility. Use one of these commands:
 #
 # For CUDA 12.6:
-#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 #
 # For CUDA 12.4:
-#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 #
 # For CPU only:
-#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#
+# For Google Colab: torch is pre-installed, just run the notebook!
 #
 # The versions below are for reference; install via the commands above for proper CUDA matching.
 torch>=2.0.0
 torchvision>=0.15.0
-torchaudio>=2.0.0
+# torchaudio>=2.0.0  # Optional - not required, using librosa instead
 
 # Audio Processing
 librosa>=0.10.0
