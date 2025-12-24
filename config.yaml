@@ -10,10 +10,10 @@ data:
   # Google Drive settings (only used if use_gdrive: true)
   gdrive:
     # Path to dataset folder in Google Drive
-    # Example: /content/drive/MyDrive/datasets
-    path: "/content/drive/MyDrive/datasets"
-    # Or use folder ID from the Drive URL (alternative)
-    # folder_id: "1mDHfxtzvC-7kw0YXF0dFAcYlh7GAb2-"
+    # Thư mục chứa: clean_trainset_28spk_wav, noisy_trainset_28spk_wav, etc.
+    path: "/content/drive/MyDrive/speech_denoising_data"
+    # Folder ID from the Drive URL (backup option)
+    folder_id: "1mDHfxtzvC-7kw0YXF0dFAcYlh7GAb2-"
   
   # Local paths (used if use_gdrive: false)
   # Đường dẫn tới thư mục chứa VoiceBank + DEMAND dataset
