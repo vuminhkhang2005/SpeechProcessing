@@ -4,9 +4,22 @@
 # Deep Learning Framework
 # NOTE: torch, torchvision, and torchaudio versions must be compatible.
 # See https://pytorch.org/get-started/previous-versions/ for version compatibility.
-torch==2.9.0
-torchvision==0.24.0
-torchaudio==2.9.0
+# IMPORTANT: Install PyTorch packages together using the same index URL to ensure
+# CUDA version compatibility. Use one of these commands:
+#
+# For CUDA 12.6:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+#
+# For CUDA 12.4:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+#
+# For CPU only:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+#
+# The versions below are for reference; install via the commands above for proper CUDA matching.
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
 
 # Audio Processing
 librosa>=0.10.0
