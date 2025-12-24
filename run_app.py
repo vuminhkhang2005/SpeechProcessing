@@ -27,9 +27,9 @@ def check_dependencies():
         missing.append("torch")
     
     try:
-        import torchaudio
+        import librosa
     except ImportError:
-        missing.append("torchaudio")
+        missing.append("librosa")
     
     try:
         import tkinter

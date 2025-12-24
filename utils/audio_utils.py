@@ -1,9 +1,9 @@
 """
 Audio processing utilities for speech denoising
+Compatible with Google Colab (no torchaudio dependency)
 """
 
 import torch
-import torchaudio
 import numpy as np
 from typing import Tuple, Optional
 import librosa
@@ -133,7 +133,7 @@ def load_audio(
     mono: bool = True
 ) -> Tuple[torch.Tensor, int]:
     """
-    Load audio file
+    Load audio file using librosa (Google Colab compatible)
     
     Args:
         filepath: Path to audio file
@@ -144,19 +144,13 @@ def load_audio(
         waveform: Audio tensor
         sr: Sample rate
     """
-    waveform, sr = torchaudio.load(filepath)
+    # Use librosa to load audio (handles resampling automatically)
+    waveform, sr = librosa.load(filepath, sr=sample_rate, mono=mono)
     
-    # Resample if necessary
-    if sr != sample_rate:
-        resampler = torchaudio.transforms.Resample(sr, sample_rate)
-        waveform = resampler(waveform)
-        sr = sample_rate
+    # Convert to torch tensor
+    waveform = torch.from_numpy(waveform).float()
     
-    # Convert to mono
-    if mono and waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
-    
-    return waveform.squeeze(0), sr
+    return waveform, sr
 
 
 def save_audio(
