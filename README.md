@@ -14,6 +14,10 @@ This project implements a **speech enhancement/denoising** system that removes b
 - **Complex Ratio Mask (CRM)**: Applies learned masks to both real and imaginary STFT components
 - **Self-Attention**: Optional attention mechanism in the bottleneck for capturing long-range dependencies
 - **Multi-Resolution STFT Loss**: Combined L1 and spectral loss for better perceptual quality
+- **SI-SDR Loss**: Scale-invariant loss to prevent "lazy learning" (model just reducing volume)
+- **Energy Conservation Loss**: Ensures output maintains proper amplitude
+- **Global Normalization**: Proper data normalization using training set statistics
+- **Amplitude Preservation**: Output maintains similar loudness to input
 - **GUI Application**: User-friendly interface built with tkinter
 - **Real-time Demo**: Live microphone denoising capability
 
@@ -249,6 +253,51 @@ speech_denoising/
 │   └── metrics.py      # Evaluation metrics
 ├── requirements.txt
 └── README.md
+```
+
+## Training Tips & Troubleshooting
+
+### Common Issues and Solutions
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| Output too quiet | Model learning to reduce volume ("lazy learning") | SI-SDR loss and Energy Conservation loss are enabled by default to prevent this |
+| Early stopping too early | Low patience value | Increased to 20 epochs by default; uses min_delta threshold |
+| Distorted output | Improper phase handling | Model uses Complex Ratio Mask which preserves phase information |
+| Inconsistent volume | Per-file normalization | Use global normalization (enabled by default) |
+
+### Key Improvements in This Version
+
+1. **Anti-Lazy-Learning Losses**:
+   - **SI-SDR Loss**: Scale-invariant, doesn't reward volume reduction
+   - **Energy Conservation Loss**: Penalizes output that's too quiet or too loud
+
+2. **Proper Normalization**:
+   - Global statistics computed from training set
+   - NOT per-file peak normalization (which can amplify quiet files incorrectly)
+
+3. **Better EarlyStopping**:
+   - `restore_best_weights=True`: Automatically restores best model when stopping
+   - `min_delta`: Minimum improvement threshold to count as progress
+   - Increased patience (20 epochs) to allow proper convergence
+
+4. **Amplitude Preservation in Inference**:
+   - Output maintains similar RMS/energy as input
+   - Multiple normalization modes available (safe, energy, peak)
+
+### Recommended Training Settings
+
+```yaml
+training:
+  num_epochs: 150          # Allow enough time for convergence
+  early_stopping:
+    patience: 20           # Wait 20 epochs before stopping
+    min_delta: 0.0001      # Minimum improvement threshold
+    restore_best_weights: true  # IMPORTANT!
+
+loss:
+  si_sdr_weight: 0.7       # Scale-invariant SDR (anti-lazy-learning)
+  energy_weight: 0.2       # Energy conservation
 ```
 
 ## Notes

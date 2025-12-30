@@ -26,6 +26,16 @@ data:
   sample_rate: 16000
   segment_length: 32000  # 2 seconds at 16kHz
   
+  # Normalization settings - QUAN TRỌNG!
+  # Sử dụng global normalization thay vì per-file normalization
+  # Theo bioacoustics.stackexchange.com, điều này ngăn file yên tĩnh bị khuếch đại sai
+  use_global_norm: true
+  normalizer_path: "./data/normalizer_stats.json"
+  
+  # Data augmentation (only during training)
+  augment: true
+  augment_prob: 0.5
+  
 # STFT parameters
 stft:
   n_fft: 512
@@ -45,17 +55,30 @@ model:
 # Training parameters
 training:
   batch_size: 16
-  num_epochs: 100
+  # Tăng số epochs để model có đủ thời gian học
+  # Theo ai.stackexchange.com, có thể cần >=100 epochs cho speech denoising
+  num_epochs: 150
   learning_rate: 0.0001
   weight_decay: 0.00001
-  # Learning rate scheduler
+  
+  # Learning rate scheduler - ReduceLROnPlateau
+  # Giảm learning rate khi validation loss không cải thiện
   scheduler:
     name: "ReduceLROnPlateau"
-    patience: 5
-    factor: 0.5
-    min_lr: 0.000001
-  # Early stopping
-  early_stopping_patience: 15
+    patience: 8           # Epochs to wait before reducing LR
+    factor: 0.5           # LR *= factor when plateau
+    min_lr: 0.000001      # Minimum learning rate
+  
+  # Early stopping - CẢI TIẾN theo keras.io
+  # Tăng patience để train đủ lâu
+  early_stopping:
+    patience: 20          # Số epochs chờ trước khi dừng (tăng từ 15)
+    min_delta: 0.0001     # Ngưỡng cải thiện tối thiểu
+    restore_best_weights: true  # QUAN TRỌNG! Khôi phục best weights khi dừng
+  
+  # Backward compatibility
+  early_stopping_patience: 20
+  
   # Gradient clipping
   grad_clip: 5.0
   # Number of workers for data loading
@@ -64,19 +87,23 @@ training:
   use_amp: true
 
 # Loss function - CẢI TIẾN ĐỂ NGĂN LAZY LEARNING
+# Theo ai.stackexchange.com, MSE với activation phù hợp thường tốt hơn Binary Crossentropy
+# SI-SDR là loss scale-invariant - không quan tâm âm lượng, chỉ quan tâm chất lượng
 loss:
   # STFT domain losses
   l1_weight: 1.0           # Complex L1 loss weight
   magnitude_weight: 1.0    # Magnitude loss weight
   stft_weight: 0.5         # Multi-resolution STFT loss weight
   
-  # Time domain losses - QUAN TRỌNG!
-  # SI-SDR loss giúp ngăn model chỉ giảm volume
-  si_sdr_weight: 0.5       # Scale-Invariant SDR loss (chống lazy learning)
+  # Time domain losses - QUAN TRỌNG để ngăn lazy learning!
+  # SI-SDR loss: Nếu model chỉ giảm volume, SI-SDR sẽ KHÔNG cải thiện
+  # Đây là key để ngăn "lazy learning" pattern
+  si_sdr_weight: 0.7       # Tăng weight cho SI-SDR (từ 0.5 lên 0.7)
   time_l1_weight: 0.3      # Time domain L1 loss
   
-  # Regularization
-  energy_weight: 0.1       # Energy conservation (ngăn giảm volume quá nhiều)
+  # Regularization - ngăn model giảm volume quá nhiều
+  # Energy ratio giữa output/input nên trong khoảng [0.7, 1.3]
+  energy_weight: 0.2       # Tăng weight (từ 0.1 lên 0.2)
 
 # Checkpoints and logging
 checkpoint:

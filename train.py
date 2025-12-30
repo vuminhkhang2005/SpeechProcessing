@@ -121,9 +121,15 @@ class Trainer:
         self.save_every = ckpt_cfg.get('save_every', 5)
         self.keep_last = ckpt_cfg.get('keep_last', 3)
         
-        # Early stopping
-        self.early_stopping_patience = train_cfg.get('early_stopping_patience', 15)
+        # Early stopping - CẢI TIẾN
+        # Theo keras.io, cần giám sát val_loss với patience và min_delta hợp lý
+        early_cfg = train_cfg.get('early_stopping', {})
+        self.early_stopping_patience = early_cfg.get('patience', train_cfg.get('early_stopping_patience', 15))
+        self.early_stopping_min_delta = early_cfg.get('min_delta', 1e-4)  # Minimum improvement threshold
+        self.restore_best_weights = early_cfg.get('restore_best_weights', True)  # QUAN TRỌNG!
+        
         self.best_val_loss = float('inf')
+        self.best_model_state = None  # Store best model weights
         self.patience_counter = 0
         
         # Training state
@@ -397,13 +403,24 @@ class Trainer:
             for key, value in val_results.items():
                 self.writer.add_scalar(f'epoch/val_{key}', value, epoch)
             
-            # Check for improvement
-            is_best = val_loss < self.best_val_loss
+            # Check for improvement with min_delta threshold
+            # val_loss must improve by at least min_delta to count as improvement
+            improvement = self.best_val_loss - val_loss
+            is_best = improvement > self.early_stopping_min_delta
+            
             if is_best:
                 self.best_val_loss = val_loss
                 self.patience_counter = 0
+                
+                # Save best model state for restore_best_weights
+                if self.restore_best_weights:
+                    self.best_model_state = {
+                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
+                    }
+                    print(f"  💾 Saved best model state (val_loss: {val_loss:.4f})")
             else:
                 self.patience_counter += 1
+                print(f"  ⏳ No improvement ({self.patience_counter}/{self.early_stopping_patience})")
             
             # Save checkpoint
             if (epoch + 1) % self.save_every == 0 or is_best:
@@ -411,14 +428,34 @@ class Trainer:
             
             # Early stopping
             if self.patience_counter >= self.early_stopping_patience:
-                print(f"\nEarly stopping at epoch {epoch}")
+                print(f"\n⚠️ Early stopping triggered at epoch {epoch}")
+                print(f"   Best val_loss was {self.best_val_loss:.4f}")
+                
+                # Restore best weights (QUAN TRỌNG!)
+                if self.restore_best_weights and self.best_model_state is not None:
+                    print("   🔄 Restoring best model weights...")
+                    self.model.load_state_dict(self.best_model_state)
+                    # Also save the best model as final checkpoint
+                    self.save_checkpoint(is_best=True)
+                    print("   ✅ Best weights restored and saved")
+                
                 break
         
+        # Restore best weights at end of training (if not stopped early)
+        if self.restore_best_weights and self.best_model_state is not None:
+            print("\n🔄 Restoring best model weights...")
+            self.model.load_state_dict(self.best_model_state)
+            self.save_checkpoint(is_best=True)
+        
         self.writer.close()
-        print("\nTraining completed!")
+        print("\n" + "=" * 60)
+        print("✅ TRAINING COMPLETED!")
+        print("=" * 60)
         print(f"Best validation loss: {self.best_val_loss:.4f}")
+        print(f"Total epochs trained: {self.current_epoch + 1}")
         print(f"Checkpoints saved to: {self.ckpt_dir}")
         print(f"Logs saved to: {self.log_dir}")
+        print("=" * 60)
 
 
 def load_config(config_path: str) -> dict:

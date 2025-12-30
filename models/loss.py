@@ -495,16 +495,27 @@ class TimeDomainL1Loss(nn.Module):
 
 class EnergyConservationLoss(nn.Module):
     """
-    Loss để ngăn model giảm năng lượng/amplitude quá nhiều
+    Loss để ngăn model giảm năng lượng/amplitude quá nhiều (chống lazy learning)
     
-    Ý tưởng: Năng lượng của output không được nhỏ hơn quá nhiều so với 
-    năng lượng của clean signal
+    Vấn đề: Model có thể "lazy learn" bằng cách chỉ giảm volume để giảm loss,
+    thay vì học cách loại bỏ noise thực sự.
+    
+    Giải pháp: Phạt nếu năng lượng output khác quá nhiều so với clean signal
+    
+    Theo ai.stackexchange.com, đây là một pattern phổ biến trong speech enhancement
+    khi model không được train đúng cách.
     """
     
-    def __init__(self, min_ratio: float = 0.7, max_ratio: float = 1.3):
+    def __init__(
+        self, 
+        min_ratio: float = 0.6,  # Cho phép giảm tối đa 40%
+        max_ratio: float = 1.4,  # Cho phép tăng tối đa 40%
+        use_rms: bool = True     # Dùng RMS thay vì energy tổng
+    ):
         super().__init__()
         self.min_ratio = min_ratio
         self.max_ratio = max_ratio
+        self.use_rms = use_rms
     
     def forward(
         self,
@@ -513,22 +524,35 @@ class EnergyConservationLoss(nn.Module):
     ) -> torch.Tensor:
         """
         Phạt nếu tỷ lệ năng lượng pred/target nằm ngoài [min_ratio, max_ratio]
+        
+        Args:
+            pred: Predicted waveform
+            target: Target/clean waveform
+        
+        Returns:
+            Energy conservation loss
         """
         if pred.dim() == 3:
             pred = pred.squeeze(1)
         if target.dim() == 3:
             target = target.squeeze(1)
-            
-        pred_energy = torch.sum(pred ** 2, dim=-1)
-        target_energy = torch.sum(target ** 2, dim=-1) + 1e-8
         
-        ratio = pred_energy / target_energy
+        if self.use_rms:
+            # RMS-based ratio (more stable)
+            pred_rms = torch.sqrt(torch.mean(pred ** 2, dim=-1) + 1e-8)
+            target_rms = torch.sqrt(torch.mean(target ** 2, dim=-1) + 1e-8)
+            ratio = pred_rms / target_rms
+        else:
+            # Energy-based ratio
+            pred_energy = torch.sum(pred ** 2, dim=-1)
+            target_energy = torch.sum(target ** 2, dim=-1) + 1e-8
+            ratio = torch.sqrt(pred_energy / target_energy)  # sqrt for amplitude ratio
         
-        # Phạt nếu ratio < min_ratio (output quá nhỏ)
-        low_penalty = F.relu(self.min_ratio - ratio)
+        # Phạt nếu ratio < min_ratio (output quá nhỏ - lazy learning!)
+        low_penalty = F.relu(self.min_ratio - ratio) ** 2  # Squared for stronger penalty
         
-        # Phạt nếu ratio > max_ratio (output quá lớn)  
-        high_penalty = F.relu(ratio - self.max_ratio)
+        # Phạt nếu ratio > max_ratio (output quá lớn - có thể amplify noise)  
+        high_penalty = F.relu(ratio - self.max_ratio) ** 2
         
         return (low_penalty + high_penalty).mean()
 

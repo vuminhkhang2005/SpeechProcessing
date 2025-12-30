@@ -25,12 +25,20 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 
 from models.unet import UNetDenoiser, load_model_checkpoint, convert_old_checkpoint, detect_encoder_channels_from_checkpoint
-from utils.audio_utils import AudioProcessor, load_audio, save_audio
+from utils.audio_utils import (
+    AudioProcessor, load_audio, save_audio, 
+    match_energy, compute_rms, AmplitudePreserver
+)
 
 
 class SpeechDenoiser:
     """
     Speech Denoiser for inference
+    
+    Cải tiến:
+    - Preserve amplitude: Đảm bảo output có âm lượng tương tự input
+    - Energy matching: Khớp năng lượng output với input để tránh "quá nhỏ tiếng"
+    - Safe clipping: Tránh clipping khi save file
     """
     
     def __init__(
@@ -40,7 +48,9 @@ class SpeechDenoiser:
         n_fft: int = 512,
         hop_length: int = 128,
         win_length: int = 512,
-        sample_rate: int = 16000
+        sample_rate: int = 16000,
+        preserve_amplitude: bool = True,
+        amplitude_method: str = 'rms'
     ):
         """
         Args:
@@ -50,6 +60,8 @@ class SpeechDenoiser:
             hop_length: Hop length for STFT
             win_length: Window length for STFT
             sample_rate: Target sample rate
+            preserve_amplitude: Whether to preserve input amplitude in output
+            amplitude_method: Method for amplitude preservation ('rms', 'peak', 'energy')
         """
         # Set device
         if device is None:
@@ -61,6 +73,10 @@ class SpeechDenoiser:
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
+        
+        # Amplitude preservation settings
+        self.preserve_amplitude = preserve_amplitude
+        self.amplitude_method = amplitude_method
         
         # Audio processor
         self.audio_processor = AudioProcessor(
@@ -75,6 +91,7 @@ class SpeechDenoiser:
         self.model.eval()
         
         print(f"Model loaded on {self.device}")
+        print(f"Amplitude preservation: {preserve_amplitude} (method: {amplitude_method})")
     
     def _load_model(self, checkpoint_path: str) -> torch.nn.Module:
         """Load model from checkpoint with automatic format conversion"""
@@ -142,21 +159,33 @@ class SpeechDenoiser:
             return model
     
     @torch.no_grad()
-    def denoise(self, waveform: torch.Tensor) -> torch.Tensor:
+    def denoise(
+        self, 
+        waveform: torch.Tensor,
+        return_stats: bool = False
+    ) -> torch.Tensor:
         """
         Denoise audio waveform
         
         Args:
             waveform: Input waveform [samples] or [batch, samples]
+            return_stats: If True, also return processing statistics
         
         Returns:
-            Denoised waveform
+            Denoised waveform (and stats if requested)
         """
         # Ensure batch dimension
-        if waveform.dim() == 1:
+        single_input = waveform.dim() == 1
+        if single_input:
             waveform = waveform.unsqueeze(0)
         
         waveform = waveform.to(self.device)
+        
+        # Store input amplitude for preservation
+        if self.preserve_amplitude:
+            input_waveform_np = waveform.cpu().numpy()
+            amplitude_preserver = AmplitudePreserver(method=self.amplitude_method)
+            amplitude_preserver.store_input_stats(input_waveform_np[0] if single_input else input_waveform_np)
         
         # Compute STFT
         stft = self.audio_processor.stft(waveform)  # [batch, freq, time, 2]
@@ -169,13 +198,31 @@ class SpeechDenoiser:
         enhanced_stft = enhanced_stft.permute(0, 2, 3, 1)  # [batch, freq, time, 2]
         enhanced_wav = self.audio_processor.istft(enhanced_stft)
         
-        return enhanced_wav.squeeze(0)
+        # Amplitude preservation
+        if self.preserve_amplitude:
+            enhanced_np = enhanced_wav.squeeze(0).cpu().numpy()
+            enhanced_np = amplitude_preserver.restore_amplitude(enhanced_np)
+            enhanced_wav = torch.from_numpy(enhanced_np).float()
+            if not single_input:
+                enhanced_wav = enhanced_wav.unsqueeze(0)
+        else:
+            enhanced_wav = enhanced_wav.squeeze(0) if single_input else enhanced_wav
+        
+        if return_stats:
+            stats = {
+                'input_rms': amplitude_preserver.input_rms if self.preserve_amplitude else None,
+                'output_rms': compute_rms(enhanced_wav.cpu().numpy())
+            }
+            return enhanced_wav, stats
+        
+        return enhanced_wav
     
     def denoise_file(
         self,
         input_path: str,
         output_path: str,
-        chunk_size: Optional[int] = None
+        chunk_size: Optional[int] = None,
+        normalize_mode: str = 'safe'
     ) -> dict:
         """
         Denoise an audio file
@@ -184,6 +231,11 @@ class SpeechDenoiser:
             input_path: Path to input audio file
             output_path: Path to save denoised audio
             chunk_size: Process audio in chunks (for long files)
+            normalize_mode: How to normalize output ('safe', 'energy', 'peak', 'none')
+                - 'safe': Only scale down if would clip (default, recommended)
+                - 'energy': Match energy to input (good for preserving loudness)
+                - 'peak': Peak normalize (not recommended for speech)
+                - 'none': No normalization
         
         Returns:
             Dictionary with processing info
@@ -194,6 +246,10 @@ class SpeechDenoiser:
         waveform, sr = load_audio(input_path, self.sample_rate)
         original_length = len(waveform)
         
+        # Store input for reference
+        input_waveform = waveform.clone()
+        input_rms = compute_rms(waveform.numpy())
+        
         # Process
         if chunk_size is None or len(waveform) <= chunk_size:
             enhanced = self.denoise(waveform)
@@ -201,11 +257,27 @@ class SpeechDenoiser:
             # Process in chunks for long audio
             enhanced = self._denoise_chunks(waveform, chunk_size)
         
+        # Ensure tensor
+        if not isinstance(enhanced, torch.Tensor):
+            enhanced = torch.from_numpy(enhanced).float()
+        
         # Trim to original length
         enhanced = enhanced[:original_length]
         
-        # Save
-        save_audio(output_path, enhanced, self.sample_rate)
+        # Calculate output stats before saving
+        output_rms = compute_rms(enhanced.numpy())
+        amplitude_ratio = output_rms / (input_rms + 1e-8)
+        
+        # Save with proper normalization
+        # Use input waveform as reference for energy matching
+        reference = input_waveform.numpy() if normalize_mode == 'energy' else None
+        save_audio(
+            output_path, 
+            enhanced, 
+            self.sample_rate,
+            normalize_mode=normalize_mode,
+            reference_waveform=reference
+        )
         
         processing_time = time.time() - start_time
         rtf = processing_time / (original_length / self.sample_rate)
@@ -215,7 +287,10 @@ class SpeechDenoiser:
             'output_path': output_path,
             'duration': original_length / self.sample_rate,
             'processing_time': processing_time,
-            'rtf': rtf  # Real-time factor
+            'rtf': rtf,  # Real-time factor
+            'input_rms': input_rms,
+            'output_rms': output_rms,
+            'amplitude_ratio': amplitude_ratio
         }
     
     def _denoise_chunks(
@@ -355,6 +430,16 @@ def main():
     parser.add_argument('--chunk_size', type=int, default=160000,
                         help='Chunk size for processing (10 seconds at 16kHz)')
     
+    # Amplitude preservation options
+    parser.add_argument('--preserve_amplitude', type=bool, default=True,
+                        help='Preserve input amplitude in output')
+    parser.add_argument('--amplitude_method', type=str, default='rms',
+                        choices=['rms', 'peak', 'energy'],
+                        help='Method for amplitude preservation')
+    parser.add_argument('--normalize_mode', type=str, default='safe',
+                        choices=['safe', 'energy', 'peak', 'none'],
+                        help='How to normalize output when saving')
+    
     args = parser.parse_args()
     
     # Validate arguments
@@ -367,10 +452,12 @@ def main():
     if args.input_dir is not None and args.output_dir is None:
         args.output_dir = args.input_dir + '_denoised'
     
-    # Create denoiser
+    # Create denoiser with amplitude preservation
     denoiser = SpeechDenoiser(
         checkpoint_path=args.checkpoint,
-        device=args.device
+        device=args.device,
+        preserve_amplitude=args.preserve_amplitude,
+        amplitude_method=args.amplitude_method
     )
     
     # Process
@@ -379,12 +466,14 @@ def main():
         print(f"\nProcessing: {args.input}")
         result = denoiser.denoise_file(
             args.input, args.output,
-            chunk_size=args.chunk_size
+            chunk_size=args.chunk_size,
+            normalize_mode=args.normalize_mode
         )
         print(f"Output saved to: {result['output_path']}")
         print(f"Duration: {result['duration']:.2f}s")
         print(f"Processing time: {result['processing_time']:.2f}s")
         print(f"Real-time factor: {result['rtf']:.2f}x")
+        print(f"Amplitude ratio (output/input): {result.get('amplitude_ratio', 1.0):.3f}")
     else:
         # Directory
         print(f"\nProcessing directory: {args.input_dir}")
