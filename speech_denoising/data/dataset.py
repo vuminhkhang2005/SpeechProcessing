@@ -1,4 +1,217 @@
 """
+Dataset and dataloader helpers for VoiceBank + DEMAND speech denoising.
+
+This is the same API used by the repository root scripts, duplicated here
+because `speech_denoising/train.py` adds its own folder to PYTHONPATH.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+import random
+
+import librosa
+import torch
+from torch.utils.data import DataLoader, Dataset
+
+from utils.audio_utils import AudioProcessor
+
+
+@dataclass(frozen=True)
+class _Pair:
+    clean: Path
+    noisy: Path
+
+
+def _center_crop_or_pad(x: torch.Tensor, length: int) -> torch.Tensor:
+    if x.numel() == length:
+        return x
+    if x.numel() > length:
+        start = (x.numel() - length) // 2
+        return x[start : start + length]
+    pad = length - x.numel()
+    return torch.nn.functional.pad(x, (0, pad))
+
+
+class VoiceBankDEMANDDataset(Dataset):
+    def __init__(
+        self,
+        clean_dir: str,
+        noisy_dir: str,
+        sample_rate: int = 16000,
+        segment_length: Optional[int] = 32000,
+        mode: str = "train",  # "train" | "val" | "test"
+        n_fft: int = 512,
+        hop_length: int = 128,
+        win_length: int = 512,
+        seed: int = 1337,
+    ):
+        self.clean_dir = Path(clean_dir)
+        self.noisy_dir = Path(noisy_dir)
+        self.sample_rate = int(sample_rate)
+        self.segment_length = segment_length if segment_length is None else int(segment_length)
+        self.mode = mode
+
+        if self.mode not in {"train", "val", "test"}:
+            raise ValueError(f"mode must be train/val/test, got: {self.mode!r}")
+
+        self._rng = random.Random(seed)
+        self.audio_processor = AudioProcessor(
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            sample_rate=self.sample_rate,
+        )
+
+        self.file_pairs: List[_Pair] = self._match_pairs()
+        if not self.file_pairs:
+            raise FileNotFoundError(
+                "No matching clean/noisy pairs found. "
+                f"clean_dir={self.clean_dir} noisy_dir={self.noisy_dir}"
+            )
+
+    def _match_pairs(self) -> List[_Pair]:
+        clean_files = sorted(self.clean_dir.glob("*.wav"))
+        noisy_files = sorted(self.noisy_dir.glob("*.wav"))
+
+        clean_by_stem = {p.stem: p for p in clean_files}
+        noisy_by_stem = {p.stem: p for p in noisy_files}
+        common = sorted(set(clean_by_stem.keys()) & set(noisy_by_stem.keys()))
+
+        return [_Pair(clean=clean_by_stem[s], noisy=noisy_by_stem[s]) for s in common]
+
+    def __len__(self) -> int:
+        return len(self.file_pairs)
+
+    def _load_mono(self, path: Path) -> torch.Tensor:
+        wav_np, _ = librosa.load(str(path), sr=self.sample_rate, mono=True)
+        return torch.from_numpy(wav_np).float()
+
+    def _segment(self, clean: torch.Tensor, noisy: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.segment_length is None:
+            min_len = min(clean.numel(), noisy.numel())
+            return clean[:min_len], noisy[:min_len]
+
+        seg_len = self.segment_length
+        min_len = min(clean.numel(), noisy.numel())
+        clean = clean[:min_len]
+        noisy = noisy[:min_len]
+
+        if min_len >= seg_len:
+            if self.mode == "train":
+                start = self._rng.randint(0, min_len - seg_len)
+                return clean[start : start + seg_len], noisy[start : start + seg_len]
+            return _center_crop_or_pad(clean, seg_len), _center_crop_or_pad(noisy, seg_len)
+
+        return _center_crop_or_pad(clean, seg_len), _center_crop_or_pad(noisy, seg_len)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor | str]:
+        pair = self.file_pairs[idx]
+
+        clean = self._load_mono(pair.clean)
+        noisy = self._load_mono(pair.noisy)
+        clean, noisy = self._segment(clean, noisy)
+
+        clean_stft = self.audio_processor.stft(clean).squeeze(0)
+        noisy_stft = self.audio_processor.stft(noisy).squeeze(0)
+
+        return {
+            "clean": clean,
+            "noisy": noisy,
+            "clean_stft": clean_stft,
+            "noisy_stft": noisy_stft,
+            "filename": pair.clean.stem,
+        }
+
+
+def create_dataloaders(
+    train_clean_dir: str,
+    train_noisy_dir: str,
+    test_clean_dir: str,
+    test_noisy_dir: str,
+    sample_rate: int = 16000,
+    segment_length: int = 32000,
+    batch_size: int = 16,
+    num_workers: int = 4,
+    n_fft: int = 512,
+    hop_length: int = 128,
+    win_length: int = 512,
+    seed: int = 1337,
+) -> Tuple[DataLoader, DataLoader]:
+    train_ds = VoiceBankDEMANDDataset(
+        clean_dir=train_clean_dir,
+        noisy_dir=train_noisy_dir,
+        sample_rate=sample_rate,
+        segment_length=segment_length,
+        mode="train",
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=win_length,
+        seed=seed,
+    )
+    val_ds = VoiceBankDEMANDDataset(
+        clean_dir=test_clean_dir,
+        noisy_dir=test_noisy_dir,
+        sample_rate=sample_rate,
+        segment_length=segment_length,
+        mode="val",
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=win_length,
+        seed=seed,
+    )
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=False,
+    )
+
+    return train_loader, val_loader
+
+
+def setup_gdrive_dataset(
+    gdrive_path: Optional[str] = None,
+    gdrive_folder_id: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    if not gdrive_path:
+        return None
+
+    root = Path(gdrive_path)
+    if not root.exists():
+        return None
+
+    train_clean_dir = root / "clean_trainset_28spk_wav"
+    train_noisy_dir = root / "noisy_trainset_28spk_wav"
+    test_clean_dir = root / "clean_testset_wav"
+    test_noisy_dir = root / "noisy_testset_wav"
+
+    expected = [train_clean_dir, train_noisy_dir, test_clean_dir, test_noisy_dir]
+    if not all(p.exists() for p in expected):
+        return None
+
+    return {
+        "train_clean_dir": str(train_clean_dir),
+        "train_noisy_dir": str(train_noisy_dir),
+        "test_clean_dir": str(test_clean_dir),
+        "test_noisy_dir": str(test_noisy_dir),
+        "gdrive_folder_id": gdrive_folder_id or "",
+    }
+
+"""
 Dataset classes and utilities for VoiceBank + DEMAND speech denoising dataset
 
 This module provides:

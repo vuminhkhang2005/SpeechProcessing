@@ -120,10 +120,12 @@ class Trainer:
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         self.save_every = ckpt_cfg.get('save_every', 5)
         self.keep_last = ckpt_cfg.get('keep_last', 3)
+        self.best_ckpt_path = self.ckpt_dir / 'best_model.pt'
         
         # Early stopping
         self.early_stopping_patience = train_cfg.get('early_stopping_patience', 15)
         self.best_val_loss = float('inf')
+        self.best_epoch = -1
         self.patience_counter = 0
         
         # Training state
@@ -368,7 +370,8 @@ class Trainer:
         print(f"Device: {self.device}")
         print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
         print()
-        
+
+        early_stopped = False
         for epoch in range(self.current_epoch, self.num_epochs):
             self.current_epoch = epoch
             
@@ -401,6 +404,7 @@ class Trainer:
             is_best = val_loss < self.best_val_loss
             if is_best:
                 self.best_val_loss = val_loss
+                self.best_epoch = epoch
                 self.patience_counter = 0
             else:
                 self.patience_counter += 1
@@ -412,8 +416,17 @@ class Trainer:
             # Early stopping
             if self.patience_counter >= self.early_stopping_patience:
                 print(f"\nEarly stopping at epoch {epoch}")
+                early_stopped = True
                 break
-        
+
+        # Restore best weights (equivalent to Keras restore_best_weights=True)
+        if early_stopped and self.best_ckpt_path.exists():
+            best_ckpt = torch.load(self.best_ckpt_path, map_location=self.device, weights_only=False)
+            if 'model_state_dict' in best_ckpt:
+                self.model.load_state_dict(best_ckpt['model_state_dict'])
+                best_epoch = best_ckpt.get('epoch', self.best_epoch)
+                print(f"\nRestored best weights from epoch {best_epoch} (best_val_loss={self.best_val_loss:.4f})")
+
         self.writer.close()
         print("\nTraining completed!")
         print(f"Best validation loss: {self.best_val_loss:.4f}")

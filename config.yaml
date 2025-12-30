@@ -36,7 +36,9 @@ stft:
 model:
   name: "UNetDenoiser"
   # Encoder channels
-  encoder_channels: [1, 32, 64, 128, 256, 512]
+  # NOTE: This list is the per-stage channel width of the U-Net encoder.
+  # It should NOT include the input channel count (input is fixed at 2: real+imag).
+  encoder_channels: [32, 64, 128, 256, 512]
   # Use attention in bottleneck
   use_attention: true
   # Dropout rate
