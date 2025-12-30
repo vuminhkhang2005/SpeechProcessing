@@ -1,5 +1,5 @@
 """
-Speech Denoising Application - GUI với Tkinter
+Speech Denoising Application - Modern GUI với Tkinter
 
 Ứng dụng hoàn chỉnh để khử nhiễu giọng nói với giao diện đồ họa.
 
@@ -67,178 +67,378 @@ except ImportError:
 
 
 class ModernStyle:
-    """Modern styling constants for the application"""
+    """Modern styling constants for the application - Clean Dark Theme"""
     
-    # Colors
-    BG_PRIMARY = "#1e1e2e"  # Dark background
-    BG_SECONDARY = "#2d2d44"  # Slightly lighter
-    BG_TERTIARY = "#3d3d5c"  # Accent background
+    # Colors - Modern Dark Theme (easier on eyes)
+    BG_DARK = "#0f0f0f"        # Darkest - window bg
+    BG_PRIMARY = "#1a1a1a"      # Main panels
+    BG_SECONDARY = "#242424"    # Cards/frames
+    BG_TERTIARY = "#2e2e2e"     # Hover/accent bg
+    BG_INPUT = "#1e1e1e"        # Input fields
     
-    FG_PRIMARY = "#ffffff"  # White text
-    FG_SECONDARY = "#b4b4b4"  # Gray text
+    # Text colors
+    FG_PRIMARY = "#ffffff"      # Main text
+    FG_SECONDARY = "#a0a0a0"    # Secondary text
+    FG_MUTED = "#666666"        # Muted/disabled text
     
-    ACCENT = "#7c3aed"  # Purple accent
-    ACCENT_HOVER = "#8b5cf6"
-    ACCENT_LIGHT = "#a78bfa"
+    # Accent colors
+    ACCENT = "#3b82f6"          # Blue primary accent
+    ACCENT_HOVER = "#60a5fa"    # Blue hover
+    ACCENT_DARK = "#1d4ed8"     # Blue pressed
     
-    SUCCESS = "#22c55e"  # Green
-    WARNING = "#f59e0b"  # Orange
-    ERROR = "#ef4444"  # Red
-    INFO = "#3b82f6"  # Blue
+    # Status colors
+    SUCCESS = "#22c55e"         # Green
+    SUCCESS_BG = "#052e16"      # Green background
+    WARNING = "#f59e0b"         # Orange
+    WARNING_BG = "#451a03"      # Orange background
+    ERROR = "#ef4444"           # Red
+    ERROR_BG = "#450a0a"        # Red background
+    INFO = "#3b82f6"            # Blue
+    INFO_BG = "#172554"         # Blue background
     
-    # Fonts
-    FONT_FAMILY = "Segoe UI"
+    # Borders
+    BORDER = "#333333"
+    BORDER_FOCUS = "#3b82f6"
+    
+    # Fonts - cross-platform
+    FONT_FAMILY = ("Segoe UI", "SF Pro Display", "Helvetica Neue", "Arial")
+    FONT_SIZE_XL = 18
     FONT_SIZE_LARGE = 14
     FONT_SIZE_NORMAL = 11
-    FONT_SIZE_SMALL = 9
+    FONT_SIZE_SMALL = 10
     
     # Padding
+    PAD_XS = 2
     PAD_SMALL = 5
     PAD_MEDIUM = 10
-    PAD_LARGE = 20
+    PAD_LARGE = 15
+    PAD_XL = 20
+    
+    # Border radius (simulated with relief)
+    RELIEF = "flat"
+    
+    @staticmethod
+    def get_font(size="normal", bold=False):
+        """Get font tuple for cross-platform compatibility"""
+        sizes = {
+            "xl": ModernStyle.FONT_SIZE_XL,
+            "large": ModernStyle.FONT_SIZE_LARGE, 
+            "normal": ModernStyle.FONT_SIZE_NORMAL,
+            "small": ModernStyle.FONT_SIZE_SMALL
+        }
+        weight = "bold" if bold else "normal"
+        return (ModernStyle.FONT_FAMILY[0], sizes.get(size, ModernStyle.FONT_SIZE_NORMAL), weight)
+
+
+class ThreadSafeCallback:
+    """Helper class for thread-safe GUI updates"""
+    
+    def __init__(self, widget):
+        self.widget = widget
+        self.queue = queue.Queue()
+        self._check_queue()
+    
+    def _check_queue(self):
+        """Check queue and execute callbacks"""
+        try:
+            while True:
+                callback = self.queue.get_nowait()
+                callback()
+        except queue.Empty:
+            pass
+        self.widget.after(50, self._check_queue)
+    
+    def call(self, callback):
+        """Thread-safe callback execution"""
+        self.queue.put(callback)
 
 
 class AudioPlayer:
-    """Simple audio player using sounddevice"""
+    """Improved audio player with better state management"""
     
     def __init__(self, sample_rate: int = 16000):
         self.sample_rate = sample_rate
         self.is_playing = False
         self.current_audio = None
         self.play_thread = None
+        self._lock = threading.Lock()
         
-    def play(self, audio: np.ndarray, callback: Optional[Callable] = None):
-        """Play audio asynchronously"""
+    def play(self, audio: np.ndarray, on_start: Optional[Callable] = None, 
+             on_finish: Optional[Callable] = None, on_error: Optional[Callable] = None):
+        """Play audio asynchronously with callbacks"""
         if not AUDIO_PLAYBACK_AVAILABLE:
-            messagebox.showwarning("Cảnh báo", "Không thể phát audio. Cài đặt sounddevice: pip install sounddevice")
-            return
+            if on_error:
+                on_error("sounddevice not installed")
+            return False
         
         self.stop()
-        self.current_audio = audio
-        self.is_playing = True
+        
+        with self._lock:
+            self.current_audio = audio
+            self.is_playing = True
         
         def _play():
             try:
+                if on_start:
+                    on_start()
                 sd.play(audio, self.sample_rate)
                 sd.wait()
             except Exception as e:
-                print(f"Playback error: {e}")
+                if on_error:
+                    on_error(str(e))
             finally:
-                self.is_playing = False
-                if callback:
-                    callback()
+                with self._lock:
+                    self.is_playing = False
+                if on_finish:
+                    on_finish()
         
         self.play_thread = threading.Thread(target=_play, daemon=True)
         self.play_thread.start()
+        return True
     
     def stop(self):
         """Stop current playback"""
-        if AUDIO_PLAYBACK_AVAILABLE:
-            sd.stop()
-        self.is_playing = False
+        with self._lock:
+            if AUDIO_PLAYBACK_AVAILABLE:
+                try:
+                    sd.stop()
+                except Exception:
+                    pass
+            self.is_playing = False
+    
+    @property
+    def playing(self):
+        """Check if currently playing"""
+        with self._lock:
+            return self.is_playing
+
+
+class StatusBar(ttk.Frame):
+    """Modern status bar with model indicator"""
+    
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        
+        # Left side - status text
+        self.status_var = tk.StringVar(value="San sang")
+        self.status_label = ttk.Label(
+            self, 
+            textvariable=self.status_var,
+            font=ModernStyle.get_font("small")
+        )
+        self.status_label.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
+        
+        # Right side - model status indicator
+        self.model_frame = ttk.Frame(self)
+        self.model_frame.pack(side=tk.RIGHT, padx=ModernStyle.PAD_MEDIUM)
+        
+        self.model_indicator = tk.Canvas(
+            self.model_frame, 
+            width=10, height=10, 
+            bg=ModernStyle.BG_PRIMARY,
+            highlightthickness=0
+        )
+        self.model_indicator.pack(side=tk.LEFT, padx=(0, 5))
+        self._draw_indicator(False)
+        
+        self.model_label = ttk.Label(
+            self.model_frame,
+            text="Chua tai model",
+            font=ModernStyle.get_font("small")
+        )
+        self.model_label.pack(side=tk.LEFT)
+    
+    def _draw_indicator(self, loaded: bool):
+        """Draw status indicator circle"""
+        self.model_indicator.delete("all")
+        color = ModernStyle.SUCCESS if loaded else ModernStyle.FG_MUTED
+        self.model_indicator.create_oval(2, 2, 8, 8, fill=color, outline="")
+    
+    def set_status(self, text: str):
+        """Set status text"""
+        self.status_var.set(text)
+    
+    def set_model_status(self, loaded: bool, device: str = ""):
+        """Set model status"""
+        self._draw_indicator(loaded)
+        if loaded:
+            self.model_label.config(text=f"Model: {device}")
+        else:
+            self.model_label.config(text="Chua tai model")
 
 
 class DenoiseTab(ttk.Frame):
-    """Tab for single file denoising"""
+    """Tab for single file denoising - improved version"""
     
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
         self.audio_player = AudioPlayer()
+        self.callback_handler = ThreadSafeCallback(self)
         
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
-        self.status_text = tk.StringVar(value="Sẵn sàng")
+        self.status_text = tk.StringVar(value="San sang xu ly")
         
         self.input_audio = None
         self.output_audio = None
+        self.is_processing = False
         
         self._create_widgets()
     
     def _create_widgets(self):
-        # Main container
+        # Main container with padding
         main_frame = ttk.Frame(self, padding=ModernStyle.PAD_LARGE)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # === Input Section ===
-        input_frame = ttk.LabelFrame(main_frame, text="📂 File Đầu Vào", padding=ModernStyle.PAD_MEDIUM)
-        input_frame.pack(fill=tk.X, pady=(0, ModernStyle.PAD_MEDIUM))
+        # === Top Section - File I/O ===
+        io_frame = ttk.Frame(main_frame)
+        io_frame.pack(fill=tk.X, pady=(0, ModernStyle.PAD_MEDIUM))
         
-        # Input file selection
-        input_row = ttk.Frame(input_frame)
-        input_row.pack(fill=tk.X, pady=ModernStyle.PAD_SMALL)
+        # Input Section
+        self._create_input_section(io_frame)
         
-        ttk.Label(input_row, text="File audio nhiễu:").pack(side=tk.LEFT)
-        ttk.Entry(input_row, textvariable=self.input_path, width=50).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
-        ttk.Button(input_row, text="Chọn...", command=self._browse_input).pack(side=tk.LEFT)
-        
-        # Input playback controls
-        input_controls = ttk.Frame(input_frame)
-        input_controls.pack(fill=tk.X, pady=ModernStyle.PAD_SMALL)
-        
-        self.play_input_btn = ttk.Button(input_controls, text="▶ Phát Input", command=self._play_input)
-        self.play_input_btn.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
-        
-        ttk.Button(input_controls, text="⏹ Dừng", command=self._stop_audio).pack(side=tk.LEFT)
-        
-        self.input_info_label = ttk.Label(input_controls, text="")
-        self.input_info_label.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
-        
-        # === Output Section ===
-        output_frame = ttk.LabelFrame(main_frame, text="💾 File Đầu Ra", padding=ModernStyle.PAD_MEDIUM)
-        output_frame.pack(fill=tk.X, pady=(0, ModernStyle.PAD_MEDIUM))
-        
-        # Output file selection
-        output_row = ttk.Frame(output_frame)
-        output_row.pack(fill=tk.X, pady=ModernStyle.PAD_SMALL)
-        
-        ttk.Label(output_row, text="File audio sạch:").pack(side=tk.LEFT)
-        ttk.Entry(output_row, textvariable=self.output_path, width=50).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
-        ttk.Button(output_row, text="Chọn...", command=self._browse_output).pack(side=tk.LEFT)
-        
-        # Output playback controls
-        output_controls = ttk.Frame(output_frame)
-        output_controls.pack(fill=tk.X, pady=ModernStyle.PAD_SMALL)
-        
-        self.play_output_btn = ttk.Button(output_controls, text="▶ Phát Output", command=self._play_output, state=tk.DISABLED)
-        self.play_output_btn.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
-        
-        self.output_info_label = ttk.Label(output_controls, text="")
-        self.output_info_label.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
+        # Output Section
+        self._create_output_section(io_frame)
         
         # === Process Section ===
-        process_frame = ttk.LabelFrame(main_frame, text="⚡ Xử Lý", padding=ModernStyle.PAD_MEDIUM)
-        process_frame.pack(fill=tk.X, pady=(0, ModernStyle.PAD_MEDIUM))
-        
-        # Process button
-        btn_frame = ttk.Frame(process_frame)
-        btn_frame.pack(fill=tk.X)
-        
-        self.process_btn = ttk.Button(btn_frame, text="🎵 Khử Nhiễu", command=self._process, style="Accent.TButton")
-        self.process_btn.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
-        
-        self.progress = ttk.Progressbar(btn_frame, mode='indeterminate', length=200)
-        self.progress.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
-        
-        ttk.Label(btn_frame, textvariable=self.status_text).pack(side=tk.LEFT)
+        self._create_process_section(main_frame)
         
         # === Visualization Section ===
         if VISUALIZATION_AVAILABLE:
-            viz_frame = ttk.LabelFrame(main_frame, text="📊 So Sánh Spectrogram", padding=ModernStyle.PAD_MEDIUM)
-            viz_frame.pack(fill=tk.BOTH, expand=True)
-            
-            # Create matplotlib figure
-            self.fig = Figure(figsize=(10, 4), dpi=100, facecolor=ModernStyle.BG_SECONDARY)
-            self.fig.patch.set_facecolor('#2d2d44')
-            
-            self.canvas = FigureCanvasTkAgg(self.fig, master=viz_frame)
-            self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            
-            # Toolbar
-            toolbar_frame = ttk.Frame(viz_frame)
-            toolbar_frame.pack(fill=tk.X)
-            self.toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
-            self.toolbar.update()
+            self._create_visualization_section(main_frame)
+    
+    def _create_input_section(self, parent):
+        """Create input file section"""
+        input_frame = ttk.LabelFrame(parent, text="  File Dau Vao  ", padding=ModernStyle.PAD_MEDIUM)
+        input_frame.pack(fill=tk.X, pady=(0, ModernStyle.PAD_SMALL))
+        
+        # File selection row
+        file_row = ttk.Frame(input_frame)
+        file_row.pack(fill=tk.X, pady=(0, ModernStyle.PAD_SMALL))
+        
+        ttk.Label(file_row, text="File audio nhieu:", width=15, anchor="w").pack(side=tk.LEFT)
+        
+        entry = ttk.Entry(file_row, textvariable=self.input_path)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=ModernStyle.PAD_SMALL)
+        
+        browse_btn = ttk.Button(file_row, text="Chon File...", command=self._browse_input, width=12)
+        browse_btn.pack(side=tk.LEFT)
+        
+        # Playback controls
+        control_row = ttk.Frame(input_frame)
+        control_row.pack(fill=tk.X)
+        
+        self.play_input_btn = ttk.Button(
+            control_row, 
+            text="Phat Audio", 
+            command=self._play_input,
+            width=12
+        )
+        self.play_input_btn.pack(side=tk.LEFT)
+        
+        self.stop_btn = ttk.Button(
+            control_row, 
+            text="Dung", 
+            command=self._stop_audio,
+            width=8
+        )
+        self.stop_btn.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
+        
+        self.input_info_label = ttk.Label(control_row, text="", foreground=ModernStyle.FG_SECONDARY)
+        self.input_info_label.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
+    
+    def _create_output_section(self, parent):
+        """Create output file section"""
+        output_frame = ttk.LabelFrame(parent, text="  File Dau Ra  ", padding=ModernStyle.PAD_MEDIUM)
+        output_frame.pack(fill=tk.X)
+        
+        # File selection row
+        file_row = ttk.Frame(output_frame)
+        file_row.pack(fill=tk.X, pady=(0, ModernStyle.PAD_SMALL))
+        
+        ttk.Label(file_row, text="Luu file sach:", width=15, anchor="w").pack(side=tk.LEFT)
+        
+        entry = ttk.Entry(file_row, textvariable=self.output_path)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=ModernStyle.PAD_SMALL)
+        
+        browse_btn = ttk.Button(file_row, text="Chon...", command=self._browse_output, width=12)
+        browse_btn.pack(side=tk.LEFT)
+        
+        # Playback controls
+        control_row = ttk.Frame(output_frame)
+        control_row.pack(fill=tk.X)
+        
+        self.play_output_btn = ttk.Button(
+            control_row, 
+            text="Phat Output", 
+            command=self._play_output,
+            state=tk.DISABLED,
+            width=12
+        )
+        self.play_output_btn.pack(side=tk.LEFT)
+        
+        self.output_info_label = ttk.Label(control_row, text="", foreground=ModernStyle.FG_SECONDARY)
+        self.output_info_label.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
+    
+    def _create_process_section(self, parent):
+        """Create processing controls section"""
+        process_frame = ttk.LabelFrame(parent, text="  Xu Ly  ", padding=ModernStyle.PAD_MEDIUM)
+        process_frame.pack(fill=tk.X, pady=ModernStyle.PAD_MEDIUM)
+        
+        # Button row
+        btn_row = ttk.Frame(process_frame)
+        btn_row.pack(fill=tk.X)
+        
+        self.process_btn = ttk.Button(
+            btn_row, 
+            text="KHU NHIEU",
+            command=self._process,
+            style="Accent.TButton",
+            width=15
+        )
+        self.process_btn.pack(side=tk.LEFT)
+        
+        # Progress bar
+        self.progress = ttk.Progressbar(btn_row, mode='indeterminate', length=200)
+        self.progress.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
+        
+        # Status label
+        self.status_label = ttk.Label(
+            btn_row, 
+            textvariable=self.status_text,
+            foreground=ModernStyle.FG_SECONDARY
+        )
+        self.status_label.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
+    
+    def _create_visualization_section(self, parent):
+        """Create spectrogram visualization section"""
+        viz_frame = ttk.LabelFrame(parent, text="  So Sanh Spectrogram  ", padding=ModernStyle.PAD_MEDIUM)
+        viz_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create matplotlib figure with dark theme
+        self.fig = Figure(figsize=(10, 3.5), dpi=100, facecolor=ModernStyle.BG_SECONDARY)
+        self.fig.patch.set_facecolor(ModernStyle.BG_SECONDARY)
+        
+        self.canvas = FigureCanvasTkAgg(self.fig, master=viz_frame)
+        canvas_widget = self.canvas.get_tk_widget()
+        canvas_widget.pack(fill=tk.BOTH, expand=True)
+        
+        # Simple toolbar
+        toolbar_frame = ttk.Frame(viz_frame)
+        toolbar_frame.pack(fill=tk.X, pady=(ModernStyle.PAD_SMALL, 0))
+        
+        ttk.Button(toolbar_frame, text="Zoom Reset", command=self._reset_zoom, width=12).pack(side=tk.LEFT)
+        ttk.Label(toolbar_frame, text="  |  Left: Input (Nhieu)  |  Right: Output (Sach)", 
+                  foreground=ModernStyle.FG_SECONDARY).pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
+    
+    def _reset_zoom(self):
+        """Reset zoom on spectrogram"""
+        if hasattr(self, 'fig'):
+            for ax in self.fig.axes:
+                ax.autoscale()
+            self.canvas.draw()
     
     def _browse_input(self):
         """Browse for input file"""
@@ -247,20 +447,24 @@ class DenoiseTab(ttk.Frame):
             ("WAV files", "*.wav"),
             ("All files", "*.*")
         ]
-        path = filedialog.askopenfilename(filetypes=filetypes)
+        path = filedialog.askopenfilename(filetypes=filetypes, title="Chon file audio")
         if path:
             self.input_path.set(path)
             self._load_input(path)
             
             # Auto-generate output path
             base = Path(path)
-            output = base.parent / f"{base.stem}_denoised{base.suffix}"
+            output = base.parent / f"{base.stem}_denoised.wav"
             self.output_path.set(str(output))
     
     def _browse_output(self):
         """Browse for output file"""
         filetypes = [("WAV files", "*.wav")]
-        path = filedialog.asksaveasfilename(filetypes=filetypes, defaultextension=".wav")
+        path = filedialog.asksaveasfilename(
+            filetypes=filetypes, 
+            defaultextension=".wav",
+            title="Luu file output"
+        )
         if path:
             self.output_path.set(path)
     
@@ -272,49 +476,85 @@ class DenoiseTab(ttk.Frame):
                 self.input_audio = self.input_audio.numpy()
             
             duration = len(self.input_audio) / 16000
-            self.input_info_label.config(text=f"Thời lượng: {duration:.2f}s | Sample rate: 16kHz")
-            self.status_text.set("Đã tải file input")
+            self.input_info_label.config(text=f"Thoi luong: {duration:.2f}s | 16kHz")
+            self.status_text.set("Da tai file input")
+            self.play_input_btn.config(state=tk.NORMAL)
             
             # Update visualization
             self._update_visualization(input_only=True)
             
         except Exception as e:
-            messagebox.showerror("Lỗi", f"Không thể tải file audio: {e}")
+            messagebox.showerror("Loi", f"Khong the tai file audio:\n{e}")
+            self.status_text.set("Loi khi tai file")
     
     def _play_input(self):
         """Play input audio"""
-        if self.input_audio is not None:
-            self.audio_player.play(self.input_audio, callback=lambda: self.play_input_btn.config(text="▶ Phát Input"))
-            self.play_input_btn.config(text="🔊 Đang phát...")
+        if self.input_audio is None:
+            messagebox.showwarning("Canh bao", "Chua tai file input")
+            return
+        
+        if not AUDIO_PLAYBACK_AVAILABLE:
+            messagebox.showwarning("Canh bao", "Khong the phat audio.\nCai dat: pip install sounddevice")
+            return
+        
+        def on_start():
+            self.callback_handler.call(lambda: self.play_input_btn.config(text="Dang phat..."))
+        
+        def on_finish():
+            self.callback_handler.call(lambda: self.play_input_btn.config(text="Phat Audio"))
+        
+        def on_error(err):
+            self.callback_handler.call(lambda: messagebox.showerror("Loi", f"Loi phat audio: {err}"))
+            on_finish()
+        
+        self.audio_player.play(self.input_audio, on_start, on_finish, on_error)
     
     def _play_output(self):
         """Play output audio"""
-        if self.output_audio is not None:
-            self.audio_player.play(self.output_audio, callback=lambda: self.play_output_btn.config(text="▶ Phát Output"))
-            self.play_output_btn.config(text="🔊 Đang phát...")
+        if self.output_audio is None:
+            return
+        
+        if not AUDIO_PLAYBACK_AVAILABLE:
+            messagebox.showwarning("Canh bao", "Khong the phat audio.\nCai dat: pip install sounddevice")
+            return
+        
+        def on_start():
+            self.callback_handler.call(lambda: self.play_output_btn.config(text="Dang phat..."))
+        
+        def on_finish():
+            self.callback_handler.call(lambda: self.play_output_btn.config(text="Phat Output"))
+        
+        def on_error(err):
+            self.callback_handler.call(lambda: messagebox.showerror("Loi", f"Loi phat audio: {err}"))
+            on_finish()
+        
+        self.audio_player.play(self.output_audio, on_start, on_finish, on_error)
     
     def _stop_audio(self):
         """Stop audio playback"""
         self.audio_player.stop()
-        self.play_input_btn.config(text="▶ Phát Input")
-        self.play_output_btn.config(text="▶ Phát Output")
+        self.play_input_btn.config(text="Phat Audio")
+        if self.output_audio is not None:
+            self.play_output_btn.config(text="Phat Output")
     
     def _process(self):
         """Run denoising"""
         if not self.input_path.get():
-            messagebox.showwarning("Cảnh báo", "Vui lòng chọn file audio đầu vào")
+            messagebox.showwarning("Canh bao", "Vui long chon file audio dau vao")
             return
         
         if not self.app.denoiser:
-            messagebox.showwarning("Cảnh báo", "Vui lòng tải model trước (tab Cài Đặt)")
+            messagebox.showwarning("Canh bao", "Vui long tai model truoc!\n\nVao tab [Cai Dat] de tai model.")
             return
         
-        # Disable button and start progress
-        self.process_btn.config(state=tk.DISABLED)
-        self.progress.start()
-        self.status_text.set("Đang xử lý...")
+        if self.is_processing:
+            return
         
-        # Run in thread
+        self.is_processing = True
+        self.process_btn.config(state=tk.DISABLED)
+        self.progress.start(10)
+        self.status_text.set("Dang xu ly...")
+        
         def _run():
             try:
                 result = self.app.denoiser.denoise_file(
@@ -323,38 +563,53 @@ class DenoiseTab(ttk.Frame):
                 )
                 
                 # Load output for playback
-                self.output_audio, _ = load_audio(self.output_path.get(), sample_rate=16000)
-                if isinstance(self.output_audio, torch.Tensor):
-                    self.output_audio = self.output_audio.numpy()
+                output_audio, _ = load_audio(self.output_path.get(), sample_rate=16000)
+                if isinstance(output_audio, torch.Tensor):
+                    output_audio = output_audio.numpy()
                 
-                # Update UI in main thread
-                self.after(0, lambda: self._process_complete(result))
+                self.callback_handler.call(lambda: self._process_complete(result, output_audio))
                 
             except Exception as e:
-                self.after(0, lambda: self._process_error(str(e)))
+                self.callback_handler.call(lambda: self._process_error(str(e)))
         
         threading.Thread(target=_run, daemon=True).start()
     
-    def _process_complete(self, result: dict):
+    def _process_complete(self, result: dict, output_audio: np.ndarray):
         """Handle process completion"""
+        self.is_processing = False
+        self.output_audio = output_audio
+        
         self.progress.stop()
         self.process_btn.config(state=tk.NORMAL)
         self.play_output_btn.config(state=tk.NORMAL)
         
-        self.status_text.set(f"✅ Hoàn thành! Thời gian: {result['processing_time']:.2f}s | RTF: {result['rtf']:.2f}x")
-        self.output_info_label.config(text=f"Đã lưu: {result['output_path']}")
+        time_str = f"{result['processing_time']:.2f}s"
+        rtf_str = f"{result['rtf']:.2f}x"
+        self.status_text.set(f"Hoan thanh! Thoi gian: {time_str} | RTF: {rtf_str}")
+        self.output_info_label.config(text=f"Da luu: {Path(result['output_path']).name}")
         
         # Update visualization
         self._update_visualization()
         
-        messagebox.showinfo("Thành công", f"Đã khử nhiễu thành công!\n\nFile output: {result['output_path']}\nThời gian xử lý: {result['processing_time']:.2f}s")
+        # Update app status
+        self.app.status_bar.set_status(f"Da khu nhieu thanh cong: {Path(result['output_path']).name}")
+        
+        messagebox.showinfo(
+            "Thanh cong", 
+            f"Da khu nhieu thanh cong!\n\n"
+            f"File output: {result['output_path']}\n"
+            f"Thoi gian xu ly: {time_str}"
+        )
     
     def _process_error(self, error: str):
         """Handle process error"""
+        self.is_processing = False
         self.progress.stop()
         self.process_btn.config(state=tk.NORMAL)
-        self.status_text.set(f"❌ Lỗi: {error}")
-        messagebox.showerror("Lỗi", f"Không thể xử lý: {error}")
+        self.status_text.set(f"Loi: {error[:50]}...")
+        
+        self.app.status_bar.set_status(f"Loi xu ly")
+        messagebox.showerror("Loi", f"Khong the xu ly:\n{error}")
     
     def _update_visualization(self, input_only: bool = False):
         """Update spectrogram visualization"""
@@ -363,41 +618,56 @@ class DenoiseTab(ttk.Frame):
         
         self.fig.clear()
         
+        # Configure style for dark theme
+        plt.style.use('dark_background')
+        
         if input_only and self.input_audio is not None:
             ax = self.fig.add_subplot(111)
+            ax.set_facecolor(ModernStyle.BG_PRIMARY)
+            
             D = librosa.amplitude_to_db(np.abs(librosa.stft(self.input_audio)), ref=np.max)
-            librosa.display.specshow(D, sr=16000, x_axis='time', y_axis='hz', ax=ax, cmap='magma')
-            ax.set_title('Input (Nhiễu)', color='white', fontsize=12)
-            ax.tick_params(colors='white')
+            img = librosa.display.specshow(D, sr=16000, x_axis='time', y_axis='hz', ax=ax, cmap='magma')
+            ax.set_title('Input (Co nhieu)', color=ModernStyle.FG_PRIMARY, fontsize=12, pad=10)
+            ax.tick_params(colors=ModernStyle.FG_SECONDARY)
+            ax.set_xlabel('Thoi gian (s)', color=ModernStyle.FG_SECONDARY)
+            ax.set_ylabel('Tan so (Hz)', color=ModernStyle.FG_SECONDARY)
             
         elif self.input_audio is not None and self.output_audio is not None:
             # Two spectrograms side by side
             ax1 = self.fig.add_subplot(121)
+            ax1.set_facecolor(ModernStyle.BG_PRIMARY)
             D1 = librosa.amplitude_to_db(np.abs(librosa.stft(self.input_audio)), ref=np.max)
             librosa.display.specshow(D1, sr=16000, x_axis='time', y_axis='hz', ax=ax1, cmap='magma')
-            ax1.set_title('Input (Nhiễu)', color='white', fontsize=12)
-            ax1.tick_params(colors='white')
+            ax1.set_title('Input (Co nhieu)', color=ModernStyle.FG_PRIMARY, fontsize=11, pad=8)
+            ax1.tick_params(colors=ModernStyle.FG_SECONDARY, labelsize=9)
+            ax1.set_xlabel('Thoi gian (s)', color=ModernStyle.FG_SECONDARY, fontsize=9)
+            ax1.set_ylabel('Tan so (Hz)', color=ModernStyle.FG_SECONDARY, fontsize=9)
             
             ax2 = self.fig.add_subplot(122)
+            ax2.set_facecolor(ModernStyle.BG_PRIMARY)
             D2 = librosa.amplitude_to_db(np.abs(librosa.stft(self.output_audio)), ref=np.max)
-            librosa.display.specshow(D2, sr=16000, x_axis='time', y_axis='hz', ax=ax2, cmap='magma')
-            ax2.set_title('Output (Đã khử nhiễu)', color='white', fontsize=12)
-            ax2.tick_params(colors='white')
+            librosa.display.specshow(D2, sr=16000, x_axis='time', y_axis='hz', ax=ax2, cmap='viridis')
+            ax2.set_title('Output (Da khu nhieu)', color=ModernStyle.SUCCESS, fontsize=11, pad=8)
+            ax2.tick_params(colors=ModernStyle.FG_SECONDARY, labelsize=9)
+            ax2.set_xlabel('Thoi gian (s)', color=ModernStyle.FG_SECONDARY, fontsize=9)
+            ax2.set_ylabel('', color=ModernStyle.FG_SECONDARY, fontsize=9)
         
-        self.fig.tight_layout()
+        self.fig.tight_layout(pad=1.5)
         self.canvas.draw()
 
 
 class BatchTab(ttk.Frame):
-    """Tab for batch processing multiple files"""
+    """Tab for batch processing multiple files - improved version"""
     
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
+        self.callback_handler = ThreadSafeCallback(self)
         
         self.input_dir = tk.StringVar()
         self.output_dir = tk.StringVar()
         self.file_list = []
+        self.is_processing = False
         
         self._create_widgets()
     
@@ -406,75 +676,90 @@ class BatchTab(ttk.Frame):
         main_frame.pack(fill=tk.BOTH, expand=True)
         
         # === Directory Selection ===
-        dir_frame = ttk.LabelFrame(main_frame, text="📁 Thư Mục", padding=ModernStyle.PAD_MEDIUM)
+        dir_frame = ttk.LabelFrame(main_frame, text="  Thu Muc  ", padding=ModernStyle.PAD_MEDIUM)
         dir_frame.pack(fill=tk.X, pady=(0, ModernStyle.PAD_MEDIUM))
         
         # Input directory
         input_row = ttk.Frame(dir_frame)
-        input_row.pack(fill=tk.X, pady=ModernStyle.PAD_SMALL)
+        input_row.pack(fill=tk.X, pady=ModernStyle.PAD_XS)
         
-        ttk.Label(input_row, text="Thư mục input:", width=15).pack(side=tk.LEFT)
-        ttk.Entry(input_row, textvariable=self.input_dir, width=50).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
-        ttk.Button(input_row, text="Chọn...", command=self._browse_input_dir).pack(side=tk.LEFT)
+        ttk.Label(input_row, text="Thu muc input:", width=15, anchor="w").pack(side=tk.LEFT)
+        ttk.Entry(input_row, textvariable=self.input_dir).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
+        ttk.Button(input_row, text="Chon...", command=self._browse_input_dir, width=10).pack(side=tk.LEFT)
         
         # Output directory
         output_row = ttk.Frame(dir_frame)
-        output_row.pack(fill=tk.X, pady=ModernStyle.PAD_SMALL)
+        output_row.pack(fill=tk.X, pady=ModernStyle.PAD_XS)
         
-        ttk.Label(output_row, text="Thư mục output:", width=15).pack(side=tk.LEFT)
-        ttk.Entry(output_row, textvariable=self.output_dir, width=50).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
-        ttk.Button(output_row, text="Chọn...", command=self._browse_output_dir).pack(side=tk.LEFT)
+        ttk.Label(output_row, text="Thu muc output:", width=15, anchor="w").pack(side=tk.LEFT)
+        ttk.Entry(output_row, textvariable=self.output_dir).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
+        ttk.Button(output_row, text="Chon...", command=self._browse_output_dir, width=10).pack(side=tk.LEFT)
         
         # === File List ===
-        list_frame = ttk.LabelFrame(main_frame, text="📋 Danh Sách File", padding=ModernStyle.PAD_MEDIUM)
+        list_frame = ttk.LabelFrame(main_frame, text="  Danh Sach File  ", padding=ModernStyle.PAD_MEDIUM)
         list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, ModernStyle.PAD_MEDIUM))
         
-        # Treeview for file list
+        # Treeview with scrollbar
+        tree_container = ttk.Frame(list_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True)
+        
         columns = ("filename", "duration", "status")
-        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=10)
+        self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=12)
         
-        self.tree.heading("filename", text="Tên File")
-        self.tree.heading("duration", text="Thời Lượng")
-        self.tree.heading("status", text="Trạng Thái")
+        self.tree.heading("filename", text="Ten File")
+        self.tree.heading("duration", text="Thoi Luong")
+        self.tree.heading("status", text="Trang Thai")
         
-        self.tree.column("filename", width=300)
-        self.tree.column("duration", width=100)
-        self.tree.column("status", width=150)
+        self.tree.column("filename", width=350, minwidth=200)
+        self.tree.column("duration", width=100, minwidth=80)
+        self.tree.column("status", width=150, minwidth=100)
         
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar_y = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar_y.set)
         
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar_y.pack(side=tk.RIGHT, fill=tk.Y)
         
         # === Controls ===
         control_frame = ttk.Frame(main_frame)
         control_frame.pack(fill=tk.X)
         
-        self.scan_btn = ttk.Button(control_frame, text="🔍 Quét File", command=self._scan_files)
-        self.scan_btn.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
+        self.scan_btn = ttk.Button(control_frame, text="Quet File", command=self._scan_files, width=12)
+        self.scan_btn.pack(side=tk.LEFT, padx=(0, ModernStyle.PAD_SMALL))
         
-        self.process_btn = ttk.Button(control_frame, text="🚀 Xử Lý Tất Cả", command=self._process_all, style="Accent.TButton")
+        self.process_btn = ttk.Button(
+            control_frame, 
+            text="XU LY TAT CA", 
+            command=self._process_all, 
+            style="Accent.TButton",
+            width=15
+        )
         self.process_btn.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
         
-        self.progress = ttk.Progressbar(control_frame, mode='determinate', length=300)
-        self.progress.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
+        self.stop_btn = ttk.Button(control_frame, text="Dung", command=self._stop_processing, width=8, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
         
-        self.status_label = ttk.Label(control_frame, text="")
-        self.status_label.pack(side=tk.LEFT)
+        # Progress
+        progress_frame = ttk.Frame(control_frame)
+        progress_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=ModernStyle.PAD_MEDIUM)
+        
+        self.progress = ttk.Progressbar(progress_frame, mode='determinate', length=250)
+        self.progress.pack(side=tk.LEFT)
+        
+        self.progress_label = ttk.Label(progress_frame, text="", foreground=ModernStyle.FG_SECONDARY)
+        self.progress_label.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
     
     def _browse_input_dir(self):
         """Browse for input directory"""
-        path = filedialog.askdirectory()
+        path = filedialog.askdirectory(title="Chon thu muc chua file audio")
         if path:
             self.input_dir.set(path)
-            # Auto-generate output path
             self.output_dir.set(path + "_denoised")
             self._scan_files()
     
     def _browse_output_dir(self):
         """Browse for output directory"""
-        path = filedialog.askdirectory()
+        path = filedialog.askdirectory(title="Chon thu muc luu output")
         if path:
             self.output_dir.set(path)
     
@@ -482,7 +767,7 @@ class BatchTab(ttk.Frame):
         """Scan input directory for audio files"""
         input_dir = self.input_dir.get()
         if not input_dir or not os.path.isdir(input_dir):
-            messagebox.showwarning("Cảnh báo", "Vui lòng chọn thư mục input hợp lệ")
+            messagebox.showwarning("Canh bao", "Vui long chon thu muc input hop le")
             return
         
         # Clear current list
@@ -492,7 +777,7 @@ class BatchTab(ttk.Frame):
         
         # Find audio files
         extensions = ['.wav', '.mp3', '.flac', '.ogg']
-        for file in Path(input_dir).iterdir():
+        for file in sorted(Path(input_dir).iterdir()):
             if file.suffix.lower() in extensions:
                 self.file_list.append(file)
                 
@@ -500,55 +785,71 @@ class BatchTab(ttk.Frame):
                 try:
                     audio, _ = load_audio(str(file), sample_rate=16000)
                     if isinstance(audio, torch.Tensor):
-                        duration = len(audio) / 16000
-                    else:
-                        duration = len(audio) / 16000
-                    duration_str = f"{duration:.2f}s"
-                except:
-                    duration_str = "N/A"
+                        audio = audio.numpy()
+                    duration = len(audio) / 16000
+                    duration_str = f"{duration:.1f}s"
+                except Exception:
+                    duration_str = "--"
                 
-                self.tree.insert("", tk.END, values=(file.name, duration_str, "Chờ xử lý"))
+                self.tree.insert("", tk.END, values=(file.name, duration_str, "Cho xu ly"))
         
-        self.status_label.config(text=f"Tìm thấy {len(self.file_list)} file")
+        self.progress_label.config(text=f"Tim thay {len(self.file_list)} file")
+        self.app.status_bar.set_status(f"Da quet {len(self.file_list)} file audio")
+    
+    def _stop_processing(self):
+        """Stop batch processing"""
+        self.is_processing = False
+        self.stop_btn.config(state=tk.DISABLED)
     
     def _process_all(self):
         """Process all files"""
         if not self.file_list:
-            messagebox.showwarning("Cảnh báo", "Không có file nào để xử lý")
+            messagebox.showwarning("Canh bao", "Khong co file nao de xu ly.\nHay quet file truoc.")
             return
         
         if not self.app.denoiser:
-            messagebox.showwarning("Cảnh báo", "Vui lòng tải model trước (tab Cài Đặt)")
+            messagebox.showwarning("Canh bao", "Vui long tai model truoc!\n\nVao tab [Cai Dat] de tai model.")
+            return
+        
+        if self.is_processing:
             return
         
         output_dir = Path(self.output_dir.get())
-        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            messagebox.showerror("Loi", f"Khong the tao thu muc output:\n{e}")
+            return
         
+        self.is_processing = True
         self.process_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
         self.progress['maximum'] = len(self.file_list)
         self.progress['value'] = 0
         
         def _run():
+            success_count = 0
             for i, file in enumerate(self.file_list):
+                if not self.is_processing:
+                    break
+                
                 try:
-                    # Update status
-                    self.after(0, lambda f=file, idx=i: self._update_file_status(idx, "Đang xử lý..."))
+                    self.callback_handler.call(lambda idx=i: self._update_file_status(idx, "Dang xu ly..."))
                     
-                    # Process
-                    output_path = output_dir / file.name
+                    output_path = output_dir / f"{file.stem}_denoised.wav"
                     self.app.denoiser.denoise_file(str(file), str(output_path))
                     
-                    # Update status
-                    self.after(0, lambda idx=i: self._update_file_status(idx, "✅ Hoàn thành"))
+                    success_count += 1
+                    self.callback_handler.call(lambda idx=i: self._update_file_status(idx, "Hoan thanh"))
                     
                 except Exception as e:
-                    self.after(0, lambda idx=i, err=str(e): self._update_file_status(idx, f"❌ {err}"))
+                    error_msg = str(e)[:30]
+                    self.callback_handler.call(lambda idx=i, err=error_msg: self._update_file_status(idx, f"Loi: {err}"))
                 
                 # Update progress
-                self.after(0, lambda v=i+1: self.progress.configure(value=v))
+                self.callback_handler.call(lambda v=i+1, total=len(self.file_list): self._update_progress(v, total))
             
-            # Done
-            self.after(0, self._process_complete)
+            self.callback_handler.call(lambda: self._process_complete(success_count))
         
         threading.Thread(target=_run, daemon=True).start()
     
@@ -558,95 +859,119 @@ class BatchTab(ttk.Frame):
         if index < len(items):
             values = self.tree.item(items[index])['values']
             self.tree.item(items[index], values=(values[0], values[1], status))
+            self.tree.see(items[index])
     
-    def _process_complete(self):
+    def _update_progress(self, current: int, total: int):
+        """Update progress bar and label"""
+        self.progress['value'] = current
+        self.progress_label.config(text=f"{current}/{total} file")
+    
+    def _process_complete(self, success_count: int):
         """Handle batch processing complete"""
+        self.is_processing = False
         self.process_btn.config(state=tk.NORMAL)
-        self.status_label.config(text=f"Đã xử lý xong {len(self.file_list)} file")
-        messagebox.showinfo("Thành công", f"Đã xử lý xong {len(self.file_list)} file!\n\nOutput: {self.output_dir.get()}")
+        self.stop_btn.config(state=tk.DISABLED)
+        
+        total = len(self.file_list)
+        self.progress_label.config(text=f"Xong: {success_count}/{total} file")
+        self.app.status_bar.set_status(f"Da xu ly xong {success_count}/{total} file")
+        
+        messagebox.showinfo(
+            "Hoan thanh", 
+            f"Da xu ly xong!\n\n"
+            f"Thanh cong: {success_count}/{total} file\n"
+            f"Output: {self.output_dir.get()}"
+        )
 
 
 class TrainTab(ttk.Frame):
-    """Tab for model training"""
+    """Tab for model training information"""
     
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
-        self.is_training = False
-        self.training_thread = None
-        
         self._create_widgets()
     
     def _create_widgets(self):
         main_frame = ttk.Frame(self, padding=ModernStyle.PAD_LARGE)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
+        # === Info Section ===
+        info_frame = ttk.LabelFrame(main_frame, text="  Huong Dan Training  ", padding=ModernStyle.PAD_LARGE)
+        info_frame.pack(fill=tk.X, pady=(0, ModernStyle.PAD_MEDIUM))
+        
+        info_text = """De training model, ban nen su dung command line de co hieu suat tot nhat:
+
+    python train.py --config config.yaml
+
+Cac buoc chuan bi:
+  1. Tai dataset VoiceBank + DEMAND (chay: python download_dataset.py)
+  2. Cau hinh cac tham so trong file config.yaml
+  3. Chay lenh training o tren
+
+Yeu cau phan cung:
+  - GPU voi >= 8GB VRAM (khuyen nghi)
+  - Hoac su dung Google Colab (mien phi)
+
+Xem file README.md de biet them chi tiet."""
+        
+        ttk.Label(info_frame, text=info_text, justify=tk.LEFT, 
+                  font=ModernStyle.get_font("normal")).pack(anchor=tk.W)
+        
         # === Dataset Section ===
-        dataset_frame = ttk.LabelFrame(main_frame, text="📚 Dataset", padding=ModernStyle.PAD_MEDIUM)
+        dataset_frame = ttk.LabelFrame(main_frame, text="  Dataset  ", padding=ModernStyle.PAD_MEDIUM)
         dataset_frame.pack(fill=tk.X, pady=(0, ModernStyle.PAD_MEDIUM))
         
-        self.train_clean_dir = tk.StringVar(value="./data/clean_trainset_28spk_wav")
-        self.train_noisy_dir = tk.StringVar(value="./data/noisy_trainset_28spk_wav")
-        self.test_clean_dir = tk.StringVar(value="./data/clean_testset_wav")
-        self.test_noisy_dir = tk.StringVar(value="./data/noisy_testset_wav")
+        self.train_clean = tk.StringVar(value="./data/clean_trainset_28spk_wav")
+        self.train_noisy = tk.StringVar(value="./data/noisy_trainset_28spk_wav")
         
         dirs = [
-            ("Train Clean:", self.train_clean_dir),
-            ("Train Noisy:", self.train_noisy_dir),
-            ("Test Clean:", self.test_clean_dir),
-            ("Test Noisy:", self.test_noisy_dir),
+            ("Train Clean:", self.train_clean),
+            ("Train Noisy:", self.train_noisy),
         ]
         
         for label, var in dirs:
             row = ttk.Frame(dataset_frame)
             row.pack(fill=tk.X, pady=2)
-            ttk.Label(row, text=label, width=12).pack(side=tk.LEFT)
-            ttk.Entry(row, textvariable=var, width=50).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
+            ttk.Label(row, text=label, width=12, anchor="w").pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=var).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
             ttk.Button(row, text="...", width=3, command=lambda v=var: self._browse_dir(v)).pack(side=tk.LEFT)
         
-        # === Training Parameters ===
-        param_frame = ttk.LabelFrame(main_frame, text="⚙️ Tham Số Training", padding=ModernStyle.PAD_MEDIUM)
+        # === Parameters ===
+        param_frame = ttk.LabelFrame(main_frame, text="  Tham So  ", padding=ModernStyle.PAD_MEDIUM)
         param_frame.pack(fill=tk.X, pady=(0, ModernStyle.PAD_MEDIUM))
         
-        params_grid = ttk.Frame(param_frame)
-        params_grid.pack(fill=tk.X)
+        param_row = ttk.Frame(param_frame)
+        param_row.pack(fill=tk.X)
         
-        # Row 1
-        row1 = ttk.Frame(params_grid)
-        row1.pack(fill=tk.X, pady=2)
+        params = [
+            ("Batch Size:", "16", 8),
+            ("Epochs:", "100", 8),
+            ("Learning Rate:", "0.0001", 10),
+        ]
         
-        ttk.Label(row1, text="Batch Size:").pack(side=tk.LEFT)
-        self.batch_size = tk.StringVar(value="16")
-        ttk.Entry(row1, textvariable=self.batch_size, width=10).pack(side=tk.LEFT, padx=(5, 20))
+        for label, default, width in params:
+            ttk.Label(param_row, text=label).pack(side=tk.LEFT)
+            entry = ttk.Entry(param_row, width=width)
+            entry.insert(0, default)
+            entry.pack(side=tk.LEFT, padx=(5, 20))
         
-        ttk.Label(row1, text="Epochs:").pack(side=tk.LEFT)
-        self.epochs = tk.StringVar(value="100")
-        ttk.Entry(row1, textvariable=self.epochs, width=10).pack(side=tk.LEFT, padx=(5, 20))
+        # === Actions ===
+        action_frame = ttk.Frame(main_frame)
+        action_frame.pack(fill=tk.X)
         
-        ttk.Label(row1, text="Learning Rate:").pack(side=tk.LEFT)
-        self.learning_rate = tk.StringVar(value="0.0001")
-        ttk.Entry(row1, textvariable=self.learning_rate, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Button(
+            action_frame, 
+            text="Mo Command Prompt", 
+            command=self._open_terminal,
+            width=20
+        ).pack(side=tk.LEFT)
         
-        # === Training Controls ===
-        control_frame = ttk.Frame(main_frame)
-        control_frame.pack(fill=tk.X, pady=ModernStyle.PAD_MEDIUM)
-        
-        self.train_btn = ttk.Button(control_frame, text="🚀 Bắt Đầu Training", command=self._toggle_training, style="Accent.TButton")
-        self.train_btn.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
-        
-        self.progress = ttk.Progressbar(control_frame, mode='determinate', length=300)
-        self.progress.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
-        
-        # === Log Output ===
-        log_frame = ttk.LabelFrame(main_frame, text="📝 Log", padding=ModernStyle.PAD_MEDIUM)
-        log_frame.pack(fill=tk.BOTH, expand=True)
-        
-        self.log_text = tk.Text(log_frame, height=15, bg='#1e1e2e', fg='white', insertbackground='white')
-        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scrollbar.set)
-        
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        ttk.Label(
+            action_frame, 
+            text="  Khuyen nghi chay training tu terminal de theo doi progress tot hon",
+            foreground=ModernStyle.FG_SECONDARY
+        ).pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
     
     def _browse_dir(self, var: tk.StringVar):
         """Browse for directory"""
@@ -654,49 +979,37 @@ class TrainTab(ttk.Frame):
         if path:
             var.set(path)
     
-    def _log(self, message: str):
-        """Add message to log"""
-        self.log_text.insert(tk.END, f"{message}\n")
-        self.log_text.see(tk.END)
-    
-    def _toggle_training(self):
-        """Start or stop training"""
-        if self.is_training:
-            self.is_training = False
-            self.train_btn.config(text="🚀 Bắt Đầu Training")
-            self._log("⏹ Đã dừng training")
-        else:
-            self._start_training()
-    
-    def _start_training(self):
-        """Start training"""
-        self.is_training = True
-        self.train_btn.config(text="⏹ Dừng Training")
-        self._log("=" * 50)
-        self._log("🚀 Bắt đầu training...")
+    def _open_terminal(self):
+        """Open terminal/command prompt"""
+        import subprocess
+        import platform
         
-        # Note: Full training implementation would go here
-        # For now, show a message that training should be done via command line
-        self._log("")
-        self._log("⚠️ Training đầy đủ nên được chạy từ command line:")
-        self._log("   python train.py --config config.yaml")
-        self._log("")
-        self._log("Để training từ GUI, bạn cần:")
-        self._log("1. Tải dataset VoiceBank + DEMAND")
-        self._log("2. Cấu hình đường dẫn dataset")
-        self._log("3. Có GPU với đủ VRAM (khuyến nghị >= 8GB)")
-        self._log("")
-        
-        self.is_training = False
-        self.train_btn.config(text="🚀 Bắt Đầu Training")
+        try:
+            system = platform.system()
+            if system == "Windows":
+                subprocess.Popen("cmd", shell=True)
+            elif system == "Darwin":  # macOS
+                subprocess.Popen(["open", "-a", "Terminal"])
+            else:  # Linux
+                # Try common terminal emulators
+                terminals = ["gnome-terminal", "konsole", "xfce4-terminal", "xterm"]
+                for term in terminals:
+                    try:
+                        subprocess.Popen([term])
+                        break
+                    except FileNotFoundError:
+                        continue
+        except Exception as e:
+            messagebox.showerror("Loi", f"Khong the mo terminal:\n{e}")
 
 
 class SettingsTab(ttk.Frame):
-    """Tab for application settings"""
+    """Tab for application settings - improved version"""
     
     def __init__(self, parent, app):
         super().__init__(parent)
         self.app = app
+        self.callback_handler = ThreadSafeCallback(self)
         
         self.checkpoint_path = tk.StringVar()
         self.device = tk.StringVar(value="auto")
@@ -708,63 +1021,110 @@ class SettingsTab(ttk.Frame):
         main_frame.pack(fill=tk.BOTH, expand=True)
         
         # === Model Section ===
-        model_frame = ttk.LabelFrame(main_frame, text="🧠 Model", padding=ModernStyle.PAD_MEDIUM)
+        model_frame = ttk.LabelFrame(main_frame, text="  Tai Model  ", padding=ModernStyle.PAD_MEDIUM)
         model_frame.pack(fill=tk.X, pady=(0, ModernStyle.PAD_MEDIUM))
         
         # Checkpoint selection
         ckpt_row = ttk.Frame(model_frame)
         ckpt_row.pack(fill=tk.X, pady=ModernStyle.PAD_SMALL)
         
-        ttk.Label(ckpt_row, text="Checkpoint:").pack(side=tk.LEFT)
-        ttk.Entry(ckpt_row, textvariable=self.checkpoint_path, width=50).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
-        ttk.Button(ckpt_row, text="Chọn...", command=self._browse_checkpoint).pack(side=tk.LEFT)
+        ttk.Label(ckpt_row, text="Checkpoint:", width=12, anchor="w").pack(side=tk.LEFT)
+        ttk.Entry(ckpt_row, textvariable=self.checkpoint_path).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
+        ttk.Button(ckpt_row, text="Chon File...", command=self._browse_checkpoint, width=12).pack(side=tk.LEFT)
         
         # Device selection
         device_row = ttk.Frame(model_frame)
         device_row.pack(fill=tk.X, pady=ModernStyle.PAD_SMALL)
         
-        ttk.Label(device_row, text="Device:").pack(side=tk.LEFT)
-        device_combo = ttk.Combobox(device_row, textvariable=self.device, values=["auto", "cuda", "cpu"], width=15)
+        ttk.Label(device_row, text="Device:", width=12, anchor="w").pack(side=tk.LEFT)
+        device_combo = ttk.Combobox(
+            device_row, 
+            textvariable=self.device, 
+            values=["auto", "cuda", "cpu"], 
+            width=15,
+            state="readonly"
+        )
         device_combo.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
         
-        # Load button
+        ttk.Label(
+            device_row, 
+            text="(auto = tu dong chon GPU neu co)",
+            foreground=ModernStyle.FG_SECONDARY
+        ).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
+        
+        # Load button row
         btn_row = ttk.Frame(model_frame)
-        btn_row.pack(fill=tk.X, pady=ModernStyle.PAD_SMALL)
+        btn_row.pack(fill=tk.X, pady=(ModernStyle.PAD_MEDIUM, ModernStyle.PAD_SMALL))
         
-        self.load_btn = ttk.Button(btn_row, text="📥 Tải Model", command=self._load_model, style="Accent.TButton")
-        self.load_btn.pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL)
+        self.load_btn = ttk.Button(
+            btn_row, 
+            text="TAI MODEL", 
+            command=self._load_model, 
+            style="Accent.TButton",
+            width=15
+        )
+        self.load_btn.pack(side=tk.LEFT)
         
-        self.model_status = ttk.Label(btn_row, text="Chưa tải model")
-        self.model_status.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
+        self.load_progress = ttk.Progressbar(btn_row, mode='indeterminate', length=150)
+        self.load_progress.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
+        
+        self.model_status = ttk.Label(btn_row, text="Chua tai model", foreground=ModernStyle.FG_SECONDARY)
+        self.model_status.pack(side=tk.LEFT)
         
         # === System Info ===
-        info_frame = ttk.LabelFrame(main_frame, text="💻 Thông Tin Hệ Thống", padding=ModernStyle.PAD_MEDIUM)
+        info_frame = ttk.LabelFrame(main_frame, text="  Thong Tin He Thong  ", padding=ModernStyle.PAD_MEDIUM)
         info_frame.pack(fill=tk.X, pady=(0, ModernStyle.PAD_MEDIUM))
         
-        # System info
+        # System info items
         cuda_available = torch.cuda.is_available()
-        cuda_text = f"✅ CUDA khả dụng - GPU: {torch.cuda.get_device_name(0)}" if cuda_available else "❌ CUDA không khả dụng"
+        if cuda_available:
+            try:
+                gpu_name = torch.cuda.get_device_name(0)
+                cuda_text = f"CUDA: Co (GPU: {gpu_name})"
+                cuda_color = ModernStyle.SUCCESS
+            except Exception:
+                cuda_text = "CUDA: Co"
+                cuda_color = ModernStyle.SUCCESS
+        else:
+            cuda_text = "CUDA: Khong"
+            cuda_color = ModernStyle.WARNING
         
-        ttk.Label(info_frame, text=f"PyTorch: {torch.__version__}").pack(anchor=tk.W)
-        ttk.Label(info_frame, text=cuda_text).pack(anchor=tk.W)
-        ttk.Label(info_frame, text=f"Audio playback: {'✅ Khả dụng' if AUDIO_PLAYBACK_AVAILABLE else '❌ Không khả dụng'}").pack(anchor=tk.W)
-        ttk.Label(info_frame, text=f"Visualization: {'✅ Khả dụng' if VISUALIZATION_AVAILABLE else '❌ Không khả dụng'}").pack(anchor=tk.W)
+        info_items = [
+            (f"PyTorch: {torch.__version__}", ModernStyle.FG_PRIMARY),
+            (cuda_text, cuda_color),
+            (f"Audio Playback: {'Co' if AUDIO_PLAYBACK_AVAILABLE else 'Khong (cai sounddevice)'}", 
+             ModernStyle.SUCCESS if AUDIO_PLAYBACK_AVAILABLE else ModernStyle.WARNING),
+            (f"Visualization: {'Co' if VISUALIZATION_AVAILABLE else 'Khong (cai matplotlib, librosa)'}", 
+             ModernStyle.SUCCESS if VISUALIZATION_AVAILABLE else ModernStyle.WARNING),
+        ]
+        
+        for text, color in info_items:
+            row = ttk.Frame(info_frame)
+            row.pack(fill=tk.X, pady=1)
+            
+            # Status indicator
+            indicator = tk.Canvas(row, width=8, height=8, bg=ModernStyle.BG_SECONDARY, highlightthickness=0)
+            indicator.pack(side=tk.LEFT, padx=(0, 8))
+            indicator.create_oval(0, 0, 8, 8, fill=color, outline="")
+            
+            ttk.Label(row, text=text).pack(side=tk.LEFT)
         
         # === About ===
-        about_frame = ttk.LabelFrame(main_frame, text="ℹ️ Về Ứng Dụng", padding=ModernStyle.PAD_MEDIUM)
+        about_frame = ttk.LabelFrame(main_frame, text="  Ve Ung Dung  ", padding=ModernStyle.PAD_MEDIUM)
         about_frame.pack(fill=tk.X)
         
         about_text = """Speech Denoising Application
-        
-Ứng dụng khử nhiễu giọng nói sử dụng Deep Learning.
 
-Tính năng:
-• Khử nhiễu file audio đơn lẻ hoặc nhiều file
-• So sánh trước/sau khi khử nhiễu
-• Xem spectrogram
-• Phát audio trực tiếp
+Ung dung khu nhieu giong noi su dung Deep Learning (U-Net).
 
-Developed with PyTorch and Tkinter"""
+Tinh nang:
+  - Khu nhieu file audio don le hoac hang loat
+  - So sanh spectrogram truoc/sau khi xu ly
+  - Phat audio truc tiep trong ung dung
+  - Ho tro nhieu dinh dang: WAV, MP3, FLAC, OGG
+
+Phat trien voi PyTorch va Tkinter
+Version 1.0"""
         
         ttk.Label(about_frame, text=about_text, justify=tk.LEFT).pack(anchor=tk.W)
     
@@ -774,7 +1134,7 @@ Developed with PyTorch and Tkinter"""
             ("PyTorch checkpoint", "*.pt *.pth"),
             ("All files", "*.*")
         ]
-        path = filedialog.askopenfilename(filetypes=filetypes)
+        path = filedialog.askopenfilename(filetypes=filetypes, title="Chon file checkpoint model")
         if path:
             self.checkpoint_path.set(path)
     
@@ -783,50 +1143,66 @@ Developed with PyTorch and Tkinter"""
         ckpt_path = self.checkpoint_path.get()
         
         if not ckpt_path:
-            messagebox.showwarning("Cảnh báo", "Vui lòng chọn file checkpoint")
+            messagebox.showwarning("Canh bao", "Vui long chon file checkpoint truoc")
             return
         
         if not os.path.exists(ckpt_path):
-            messagebox.showerror("Lỗi", f"File không tồn tại: {ckpt_path}")
+            messagebox.showerror("Loi", f"File khong ton tai:\n{ckpt_path}")
             return
         
         self.load_btn.config(state=tk.DISABLED)
-        self.model_status.config(text="Đang tải...")
+        self.load_progress.start(10)
+        self.model_status.config(text="Dang tai...", foreground=ModernStyle.INFO)
         
         def _load():
             try:
                 device = None if self.device.get() == "auto" else self.device.get()
-                self.app.denoiser = SpeechDenoiser(
+                denoiser = SpeechDenoiser(
                     checkpoint_path=ckpt_path,
                     device=device
                 )
-                self.after(0, lambda: self._load_complete())
+                self.callback_handler.call(lambda: self._load_complete(denoiser))
             except Exception as e:
-                self.after(0, lambda: self._load_error(str(e)))
+                self.callback_handler.call(lambda: self._load_error(str(e)))
         
         threading.Thread(target=_load, daemon=True).start()
     
-    def _load_complete(self):
+    def _load_complete(self, denoiser):
         """Handle model load complete"""
+        self.app.denoiser = denoiser
+        
         self.load_btn.config(state=tk.NORMAL)
-        device = self.app.denoiser.device
-        self.model_status.config(text=f"✅ Model đã tải ({device})")
-        messagebox.showinfo("Thành công", f"Đã tải model thành công!\nDevice: {device}")
+        self.load_progress.stop()
+        
+        device_str = str(denoiser.device)
+        self.model_status.config(text=f"Da tai ({device_str})", foreground=ModernStyle.SUCCESS)
+        
+        # Update status bar
+        self.app.status_bar.set_model_status(True, device_str)
+        self.app.status_bar.set_status("Model da san sang su dung")
+        
+        messagebox.showinfo(
+            "Thanh cong", 
+            f"Da tai model thanh cong!\n\nDevice: {device_str}\n\nBay gio ban co the su dung tab [Khu Nhieu] de xu ly audio."
+        )
     
     def _load_error(self, error: str):
         """Handle model load error"""
         self.load_btn.config(state=tk.NORMAL)
-        self.model_status.config(text=f"❌ Lỗi: {error}")
-        messagebox.showerror("Lỗi", f"Không thể tải model: {error}")
+        self.load_progress.stop()
+        self.model_status.config(text="Loi!", foreground=ModernStyle.ERROR)
+        
+        self.app.status_bar.set_status("Loi khi tai model")
+        messagebox.showerror("Loi", f"Khong the tai model:\n\n{error}")
 
 
 class SpeechDenoisingApp:
-    """Main application class"""
+    """Main application class - improved version"""
     
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("🎵 Speech Denoising - Khử Nhiễu Giọng Nói")
-        self.root.geometry("1200x800")
+        self.root.title("Speech Denoising - Khu Nhieu Giong Noi")
+        self.root.geometry("1100x750")
         self.root.minsize(900, 600)
         
         # Initialize denoiser
@@ -842,89 +1218,174 @@ class SpeechDenoisingApp:
         self._center_window()
     
     def _configure_style(self):
-        """Configure ttk styles for modern look"""
+        """Configure ttk styles for modern dark theme"""
         style = ttk.Style()
         
-        # Try to use a modern theme
+        # Use clam theme as base (most customizable)
         available_themes = style.theme_names()
         if 'clam' in available_themes:
             style.theme_use('clam')
         
-        # Configure colors
+        # Configure base styles
         style.configure(".", 
             background=ModernStyle.BG_SECONDARY,
             foreground=ModernStyle.FG_PRIMARY,
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_NORMAL)
+            font=ModernStyle.get_font("normal"),
+            borderwidth=0
         )
         
+        # Frame styles
         style.configure("TFrame", background=ModernStyle.BG_SECONDARY)
-        style.configure("TLabel", background=ModernStyle.BG_SECONDARY, foreground=ModernStyle.FG_PRIMARY)
-        style.configure("TLabelframe", background=ModernStyle.BG_SECONDARY)
-        style.configure("TLabelframe.Label", background=ModernStyle.BG_SECONDARY, foreground=ModernStyle.FG_PRIMARY, font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_NORMAL, 'bold'))
         
+        # Label styles
+        style.configure("TLabel", 
+            background=ModernStyle.BG_SECONDARY, 
+            foreground=ModernStyle.FG_PRIMARY
+        )
+        
+        # LabelFrame styles
+        style.configure("TLabelframe", 
+            background=ModernStyle.BG_SECONDARY,
+            bordercolor=ModernStyle.BORDER,
+            relief="solid",
+            borderwidth=1
+        )
+        style.configure("TLabelframe.Label", 
+            background=ModernStyle.BG_SECONDARY, 
+            foreground=ModernStyle.FG_PRIMARY,
+            font=ModernStyle.get_font("normal", bold=True)
+        )
+        
+        # Button styles
         style.configure("TButton",
             background=ModernStyle.BG_TERTIARY,
             foreground=ModernStyle.FG_PRIMARY,
-            padding=(10, 5)
+            padding=(12, 6),
+            font=ModernStyle.get_font("normal")
+        )
+        style.map("TButton",
+            background=[("active", ModernStyle.BG_INPUT), ("pressed", ModernStyle.BG_PRIMARY)],
+            foreground=[("disabled", ModernStyle.FG_MUTED)]
         )
         
+        # Accent button style
         style.configure("Accent.TButton",
             background=ModernStyle.ACCENT,
             foreground=ModernStyle.FG_PRIMARY,
             padding=(15, 8),
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_NORMAL, 'bold')
+            font=ModernStyle.get_font("normal", bold=True)
+        )
+        style.map("Accent.TButton",
+            background=[("active", ModernStyle.ACCENT_HOVER), ("pressed", ModernStyle.ACCENT_DARK)],
+            foreground=[("disabled", ModernStyle.FG_MUTED)]
         )
         
-        style.configure("TNotebook", background=ModernStyle.BG_PRIMARY)
-        style.configure("TNotebook.Tab", 
+        # Entry styles
+        style.configure("TEntry",
+            fieldbackground=ModernStyle.BG_INPUT,
+            foreground=ModernStyle.FG_PRIMARY,
+            insertcolor=ModernStyle.FG_PRIMARY,
+            padding=5
+        )
+        
+        # Combobox styles
+        style.configure("TCombobox",
+            fieldbackground=ModernStyle.BG_INPUT,
             background=ModernStyle.BG_TERTIARY,
             foreground=ModernStyle.FG_PRIMARY,
-            padding=(20, 10),
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_NORMAL)
+            arrowcolor=ModernStyle.FG_PRIMARY
+        )
+        style.map("TCombobox",
+            fieldbackground=[("readonly", ModernStyle.BG_INPUT)],
+            selectbackground=[("readonly", ModernStyle.ACCENT)]
         )
         
+        # Notebook (tabs) styles
+        style.configure("TNotebook", 
+            background=ModernStyle.BG_DARK,
+            borderwidth=0
+        )
+        style.configure("TNotebook.Tab", 
+            background=ModernStyle.BG_TERTIARY,
+            foreground=ModernStyle.FG_SECONDARY,
+            padding=(20, 8),
+            font=ModernStyle.get_font("normal")
+        )
+        style.map("TNotebook.Tab",
+            background=[("selected", ModernStyle.BG_SECONDARY)],
+            foreground=[("selected", ModernStyle.FG_PRIMARY)],
+            expand=[("selected", [1, 1, 1, 0])]
+        )
+        
+        # Treeview styles
         style.configure("Treeview",
             background=ModernStyle.BG_PRIMARY,
             foreground=ModernStyle.FG_PRIMARY,
             fieldbackground=ModernStyle.BG_PRIMARY,
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_SMALL)
+            font=ModernStyle.get_font("small"),
+            rowheight=25
         )
         style.configure("Treeview.Heading",
             background=ModernStyle.BG_TERTIARY,
             foreground=ModernStyle.FG_PRIMARY,
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_SMALL, 'bold')
+            font=ModernStyle.get_font("small", bold=True)
+        )
+        style.map("Treeview",
+            background=[("selected", ModernStyle.ACCENT)],
+            foreground=[("selected", ModernStyle.FG_PRIMARY)]
         )
         
+        # Progressbar styles
         style.configure("TProgressbar",
             background=ModernStyle.ACCENT,
-            troughcolor=ModernStyle.BG_PRIMARY
+            troughcolor=ModernStyle.BG_PRIMARY,
+            borderwidth=0,
+            thickness=8
+        )
+        
+        # Scrollbar styles
+        style.configure("TScrollbar",
+            background=ModernStyle.BG_TERTIARY,
+            troughcolor=ModernStyle.BG_PRIMARY,
+            borderwidth=0,
+            arrowcolor=ModernStyle.FG_SECONDARY
         )
         
         # Set root background
-        self.root.configure(bg=ModernStyle.BG_PRIMARY)
+        self.root.configure(bg=ModernStyle.BG_DARK)
     
     def _create_ui(self):
         """Create main UI"""
+        # Main container
+        main_container = ttk.Frame(self.root)
+        main_container.pack(fill=tk.BOTH, expand=True)
+        
         # Header
-        header = ttk.Frame(self.root, padding=ModernStyle.PAD_MEDIUM)
+        header = ttk.Frame(main_container, padding=(ModernStyle.PAD_LARGE, ModernStyle.PAD_MEDIUM))
         header.pack(fill=tk.X)
         
-        title_label = ttk.Label(header, 
-            text="🎵 Speech Denoising Application",
-            font=(ModernStyle.FONT_FAMILY, 18, 'bold')
+        # Title
+        title_frame = ttk.Frame(header)
+        title_frame.pack(side=tk.LEFT)
+        
+        title_label = ttk.Label(
+            title_frame, 
+            text="Speech Denoising",
+            font=ModernStyle.get_font("xl", bold=True)
         )
         title_label.pack(side=tk.LEFT)
         
-        subtitle_label = ttk.Label(header,
-            text="Khử nhiễu giọng nói bằng Deep Learning",
-            font=(ModernStyle.FONT_FAMILY, 10),
+        subtitle_label = ttk.Label(
+            title_frame,
+            text="   Khu nhieu giong noi bang Deep Learning",
+            font=ModernStyle.get_font("normal"),
             foreground=ModernStyle.FG_SECONDARY
         )
-        subtitle_label.pack(side=tk.LEFT, padx=ModernStyle.PAD_MEDIUM)
+        subtitle_label.pack(side=tk.LEFT)
         
         # Notebook (tabs)
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=ModernStyle.PAD_SMALL, pady=ModernStyle.PAD_SMALL)
+        self.notebook = ttk.Notebook(main_container)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=ModernStyle.PAD_SMALL, pady=(0, ModernStyle.PAD_SMALL))
         
         # Create tabs
         self.denoise_tab = DenoiseTab(self.notebook, self)
@@ -932,20 +1393,15 @@ class SpeechDenoisingApp:
         self.train_tab = TrainTab(self.notebook, self)
         self.settings_tab = SettingsTab(self.notebook, self)
         
-        self.notebook.add(self.denoise_tab, text="  🎤 Khử Nhiễu  ")
-        self.notebook.add(self.batch_tab, text="  📁 Xử Lý Hàng Loạt  ")
-        self.notebook.add(self.train_tab, text="  🎓 Huấn Luyện  ")
-        self.notebook.add(self.settings_tab, text="  ⚙️ Cài Đặt  ")
+        # Add tabs with cleaner names (no emojis for better cross-platform support)
+        self.notebook.add(self.denoise_tab, text="  Khu Nhieu  ")
+        self.notebook.add(self.batch_tab, text="  Xu Ly Hang Loat  ")
+        self.notebook.add(self.train_tab, text="  Huan Luyen  ")
+        self.notebook.add(self.settings_tab, text="  Cai Dat  ")
         
         # Status bar
-        status_bar = ttk.Frame(self.root, padding=ModernStyle.PAD_SMALL)
-        status_bar.pack(fill=tk.X, side=tk.BOTTOM)
-        
-        self.status_label = ttk.Label(status_bar, 
-            text="Sẵn sàng | Tải model từ tab Cài Đặt để bắt đầu",
-            foreground=ModernStyle.FG_SECONDARY
-        )
-        self.status_label.pack(side=tk.LEFT)
+        self.status_bar = StatusBar(main_container, self)
+        self.status_bar.pack(fill=tk.X, side=tk.BOTTOM, pady=(0, ModernStyle.PAD_SMALL), padx=ModernStyle.PAD_MEDIUM)
     
     def _center_window(self):
         """Center window on screen"""
@@ -963,17 +1419,19 @@ class SpeechDenoisingApp:
 
 def main():
     """Main entry point"""
-    print("=" * 60)
-    print("🎵 Speech Denoising Application")
-    print("=" * 60)
+    print("=" * 50)
+    print("  Speech Denoising Application")
+    print("=" * 50)
     print()
     
     # Check dependencies
-    print("Checking dependencies...")
+    print("Kiem tra dependencies...")
     print(f"  PyTorch: {torch.__version__}")
-    print(f"  CUDA available: {torch.cuda.is_available()}")
-    print(f"  Audio playback: {AUDIO_PLAYBACK_AVAILABLE}")
-    print(f"  Visualization: {VISUALIZATION_AVAILABLE}")
+    print(f"  CUDA: {'Co' if torch.cuda.is_available() else 'Khong'}")
+    print(f"  Audio playback: {'Co' if AUDIO_PLAYBACK_AVAILABLE else 'Khong'}")
+    print(f"  Visualization: {'Co' if VISUALIZATION_AVAILABLE else 'Khong'}")
+    print()
+    print("Khoi dong ung dung...")
     print()
     
     # Run app
