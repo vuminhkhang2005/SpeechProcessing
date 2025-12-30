@@ -1,161 +1,143 @@
 """
-Dataset classes and utilities for VoiceBank + DEMAND speech denoising dataset
+VoiceBank + DEMAND Dataset for Speech Denoising
 
-This module provides:
-- VoiceBankDEMANDDataset: PyTorch Dataset for loading audio pairs
-- create_dataloaders: Factory function for creating train/val dataloaders
-- Google Colab/Drive integration utilities
+Cải tiến chuẩn hóa dữ liệu:
+1. Global normalization (mean=0, std=1) thay vì per-file normalization
+2. Tính mean/std trên toàn bộ training set và áp dụng cho tất cả
+3. Tránh khuếch đại các file có nhiễu yếu
+
+References:
+- LeCun: Normalize using global statistics from training set
+- https://bioacoustics.stackexchange.com/questions/516/
 """
 
 import os
-import sys
-import random
+import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Optional, Tuple, Dict, List
+import random
 
 import torch
 import torch.nn.functional as F
-import torchaudio
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+import librosa
+import soundfile as sf
 
 
-def is_colab() -> bool:
+class AudioNormalizer:
     """
-    Check if running in Google Colab environment
+    Global Audio Normalizer
     
-    Returns:
-        True if running in Colab, False otherwise
+    Chuẩn hóa audio theo global statistics (mean, std) tính trên training set.
+    QUAN TRỌNG: Không chuẩn hóa theo từng file riêng lẻ!
+    
+    Theo khuyến cáo của LeCun và các nghiên cứu về audio preprocessing:
+    - Chuẩn hóa về mean=0, std=1 sử dụng statistics từ training set
+    - Áp dụng cùng một transformation cho tất cả files
     """
-    try:
-        import google.colab
-        return True
-    except ImportError:
-        return False
-
-
-def mount_google_drive(mount_path: str = '/content/drive') -> bool:
-    """
-    Mount Google Drive in Colab
     
-    Args:
-        mount_path: Path where Drive will be mounted
+    def __init__(
+        self,
+        global_mean: float = 0.0,
+        global_std: float = 0.1,  # Typical std for speech audio
+        eps: float = 1e-8
+    ):
+        """
+        Args:
+            global_mean: Global mean computed from training set
+            global_std: Global std computed from training set
+            eps: Small constant to prevent division by zero
+        """
+        self.global_mean = global_mean
+        self.global_std = global_std
+        self.eps = eps
     
-    Returns:
-        True if successfully mounted, False otherwise
-    """
-    if not is_colab():
-        print("Not running in Google Colab. Google Drive mount not available.")
-        return False
+    def normalize(self, audio: torch.Tensor) -> torch.Tensor:
+        """Normalize audio using global statistics"""
+        return (audio - self.global_mean) / (self.global_std + self.eps)
     
-    try:
-        from google.colab import drive
-        drive.mount(mount_path)
-        print(f"✅ Google Drive mounted at {mount_path}")
-        return True
-    except Exception as e:
-        print(f"❌ Failed to mount Google Drive: {e}")
-        return False
-
-
-def setup_gdrive_dataset(
-    gdrive_path: Optional[str] = None,
-    gdrive_folder_id: Optional[str] = None,
-    mount_path: str = '/content/drive'
-) -> Optional[Dict[str, str]]:
-    """
-    Setup dataset paths from Google Drive
+    def denormalize(self, audio: torch.Tensor) -> torch.Tensor:
+        """Denormalize audio back to original scale"""
+        return audio * (self.global_std + self.eps) + self.global_mean
     
-    Args:
-        gdrive_path: Path to dataset folder in Google Drive 
-                     (e.g., '/content/drive/MyDrive/datasets')
-        gdrive_folder_id: Google Drive folder ID (alternative to path)
-        mount_path: Where to mount Google Drive
+    @classmethod
+    def compute_global_statistics(
+        cls,
+        audio_dir: str,
+        sample_rate: int = 16000,
+        max_files: int = 1000,
+        seed: int = 42
+    ) -> Tuple[float, float]:
+        """
+        Tính global mean và std từ training set
+        
+        Args:
+            audio_dir: Directory containing audio files
+            sample_rate: Target sample rate
+            max_files: Maximum number of files to process (for speed)
+            seed: Random seed for reproducibility
+        
+        Returns:
+            Tuple of (global_mean, global_std)
+        """
+        audio_dir = Path(audio_dir)
+        wav_files = list(audio_dir.glob('*.wav'))
+        
+        # Sample subset for efficiency
+        if len(wav_files) > max_files:
+            random.seed(seed)
+            wav_files = random.sample(wav_files, max_files)
+        
+        print(f"Computing global statistics from {len(wav_files)} files...")
+        
+        all_samples = []
+        for wav_file in wav_files:
+            try:
+                audio, sr = librosa.load(wav_file, sr=sample_rate)
+                all_samples.append(audio)
+            except Exception as e:
+                print(f"Warning: Could not load {wav_file}: {e}")
+        
+        # Concatenate all samples
+        all_audio = np.concatenate(all_samples)
+        
+        global_mean = float(np.mean(all_audio))
+        global_std = float(np.std(all_audio))
+        
+        print(f"Global statistics: mean={global_mean:.6f}, std={global_std:.6f}")
+        
+        return global_mean, global_std
     
-    Returns:
-        Dictionary with dataset paths, or None if setup failed
+    def save(self, path: str):
+        """Save normalizer statistics to file"""
+        stats = {
+            'global_mean': self.global_mean,
+            'global_std': self.global_std
+        }
+        with open(path, 'w') as f:
+            json.dump(stats, f)
     
-    Example:
-        >>> paths = setup_gdrive_dataset(gdrive_path='/content/drive/MyDrive/datasets')
-        >>> train_loader, val_loader = create_dataloaders(**paths)
-    """
-    # Mount Google Drive if in Colab
-    if is_colab():
-        if not os.path.exists(mount_path):
-            if not mount_google_drive(mount_path):
-                return None
-    
-    # Determine dataset base path
-    if gdrive_path:
-        base_path = Path(gdrive_path)
-    elif gdrive_folder_id:
-        # For folder ID, user needs to have already mounted and shared the folder
-        base_path = Path(mount_path) / 'MyDrive' / 'datasets'
-        print(f"Using default path: {base_path}")
-    else:
-        # Default path
-        base_path = Path(mount_path) / 'MyDrive' / 'datasets'
-        print(f"Using default path: {base_path}")
-    
-    # Expected subdirectories
-    expected_dirs = {
-        'train_clean_dir': 'clean_trainset_28spk_wav',
-        'train_noisy_dir': 'noisy_trainset_28spk_wav',
-        'test_clean_dir': 'clean_testset_wav',
-        'test_noisy_dir': 'noisy_testset_wav'
-    }
-    
-    paths = {}
-    all_found = True
-    
-    print(f"\n📂 Checking dataset at: {base_path}")
-    print("-" * 50)
-    
-    for key, dirname in expected_dirs.items():
-        dir_path = base_path / dirname
-        if dir_path.exists():
-            wav_count = len(list(dir_path.glob('*.wav')))
-            print(f"  ✅ {dirname}: {wav_count} files")
-            paths[key] = str(dir_path)
-        else:
-            print(f"  ❌ {dirname}: Not found")
-            all_found = False
-    
-    print("-" * 50)
-    
-    if not all_found:
-        print("\n⚠️  Some dataset directories are missing!")
-        print("Expected structure:")
-        print(f"  {base_path}/")
-        print("  ├── clean_trainset_28spk_wav/")
-        print("  ├── noisy_trainset_28spk_wav/")
-        print("  ├── clean_testset_wav/")
-        print("  └── noisy_testset_wav/")
-        return None
-    
-    print("\n✅ Dataset ready!")
-    return paths
+    @classmethod
+    def load(cls, path: str) -> 'AudioNormalizer':
+        """Load normalizer statistics from file"""
+        with open(path, 'r') as f:
+            stats = json.load(f)
+        return cls(
+            global_mean=stats['global_mean'],
+            global_std=stats['global_std']
+        )
 
 
 class VoiceBankDEMANDDataset(Dataset):
     """
-    PyTorch Dataset for VoiceBank + DEMAND speech denoising dataset
+    VoiceBank + DEMAND Dataset for Speech Denoising
     
-    Each sample contains:
-    - noisy: Noisy waveform
-    - clean: Clean waveform  
-    - noisy_stft: STFT of noisy waveform [freq_bins, time_frames, 2]
-    - clean_stft: STFT of clean waveform [freq_bins, time_frames, 2]
-    
-    Args:
-        clean_dir: Path to directory containing clean audio files
-        noisy_dir: Path to directory containing noisy audio files
-        sample_rate: Target sample rate (default: 16000)
-        segment_length: Length of audio segments in samples (default: 32000 = 2 seconds)
-        n_fft: FFT size for STFT (default: 512)
-        hop_length: Hop length for STFT (default: 128)
-        win_length: Window length for STFT (default: 512)
-        train: Whether this is training set (enables random cropping)
+    Cải tiến:
+    1. Global normalization thay vì per-file normalization
+    2. Consistent sample rate and length
+    3. Proper pairing of clean/noisy files
+    4. On-the-fly STFT computation
     """
     
     def __init__(
@@ -163,92 +145,137 @@ class VoiceBankDEMANDDataset(Dataset):
         clean_dir: str,
         noisy_dir: str,
         sample_rate: int = 16000,
-        segment_length: int = 32000,
+        segment_length: Optional[int] = 32000,  # 2 seconds at 16kHz
+        mode: str = 'train',  # 'train', 'val', 'test'
         n_fft: int = 512,
         hop_length: int = 128,
         win_length: int = 512,
-        train: bool = True
+        normalizer: Optional[AudioNormalizer] = None,
+        augment: bool = False
     ):
+        """
+        Args:
+            clean_dir: Directory containing clean audio files
+            noisy_dir: Directory containing noisy audio files
+            sample_rate: Target sample rate
+            segment_length: Length of audio segments (None for full audio)
+            mode: Dataset mode ('train', 'val', 'test')
+            n_fft: FFT size for STFT
+            hop_length: Hop length for STFT
+            win_length: Window length for STFT
+            normalizer: AudioNormalizer instance (uses default if None)
+            augment: Whether to apply data augmentation
+        """
+        super().__init__()
+        
         self.clean_dir = Path(clean_dir)
         self.noisy_dir = Path(noisy_dir)
         self.sample_rate = sample_rate
         self.segment_length = segment_length
+        self.mode = mode
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
-        self.train = train
+        self.augment = augment and mode == 'train'
         
-        # Get list of audio files
-        self.clean_files = sorted(list(self.clean_dir.glob('*.wav')))
-        self.noisy_files = sorted(list(self.noisy_dir.glob('*.wav')))
+        # Setup normalizer - QUAN TRỌNG: dùng global statistics
+        if normalizer is not None:
+            self.normalizer = normalizer
+        else:
+            # Default values based on typical speech audio
+            # Should be computed from actual training data for best results
+            self.normalizer = AudioNormalizer(global_mean=0.0, global_std=0.05)
         
-        # Create mapping from filename to path for matching
-        self.clean_map = {f.name: f for f in self.clean_files}
-        self.noisy_map = {f.name: f for f in self.noisy_files}
-        
-        # Find matching pairs (same filename in both directories)
-        self.file_pairs = []
-        for noisy_file in self.noisy_files:
-            if noisy_file.name in self.clean_map:
-                self.file_pairs.append({
-                    'clean': self.clean_map[noisy_file.name],
-                    'noisy': noisy_file
-                })
-        
-        if len(self.file_pairs) == 0:
-            raise ValueError(
-                f"No matching file pairs found between:\n"
-                f"  Clean: {clean_dir} ({len(self.clean_files)} files)\n"
-                f"  Noisy: {noisy_dir} ({len(self.noisy_files)} files)"
-            )
-        
-        # STFT window
+        # Hann window for STFT
         self.window = torch.hann_window(win_length)
         
-        print(f"Dataset loaded: {len(self.file_pairs)} audio pairs")
+        # Load file list
+        self.file_list = self._get_file_list()
+        
+        if len(self.file_list) == 0:
+            raise ValueError(
+                f"No matching audio files found.\n"
+                f"Clean dir: {self.clean_dir}\n"
+                f"Noisy dir: {self.noisy_dir}"
+            )
+        
+        print(f"Loaded {len(self.file_list)} audio pairs for {mode}")
     
-    def __len__(self) -> int:
-        return len(self.file_pairs)
+    def _get_file_list(self) -> List[Tuple[Path, Path]]:
+        """Get list of matching clean/noisy file pairs"""
+        clean_files = {f.name: f for f in self.clean_dir.glob('*.wav')}
+        noisy_files = {f.name: f for f in self.noisy_dir.glob('*.wav')}
+        
+        # Find matching pairs
+        common_names = set(clean_files.keys()) & set(noisy_files.keys())
+        
+        file_list = [(clean_files[name], noisy_files[name]) 
+                     for name in sorted(common_names)]
+        
+        return file_list
     
-    def _load_audio(self, filepath: Path) -> torch.Tensor:
-        """Load and preprocess audio file"""
-        waveform, sr = torchaudio.load(filepath)
-        
-        # Resample if necessary
-        if sr != self.sample_rate:
-            resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
-            waveform = resampler(waveform)
-        
-        # Convert to mono
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        
-        return waveform.squeeze(0)
+    def _load_audio(self, path: Path) -> torch.Tensor:
+        """Load audio file and convert to tensor"""
+        audio, sr = librosa.load(path, sr=self.sample_rate, mono=True)
+        return torch.from_numpy(audio).float()
     
-    def _random_crop(self, clean: torch.Tensor, noisy: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Randomly crop audio to segment_length"""
-        length = clean.shape[-1]
+    def _get_segment(
+        self,
+        clean: torch.Tensor,
+        noisy: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Extract random segment from audio pair"""
+        if self.segment_length is None or len(clean) <= self.segment_length:
+            # Use full audio
+            if self.segment_length is not None:
+                # Pad if necessary
+                if len(clean) < self.segment_length:
+                    pad_len = self.segment_length - len(clean)
+                    clean = F.pad(clean, (0, pad_len))
+                    noisy = F.pad(noisy, (0, pad_len))
+            return clean, noisy
         
-        if length < self.segment_length:
-            # Pad if too short
-            pad_length = self.segment_length - length
-            clean = F.pad(clean, (0, pad_length))
-            noisy = F.pad(noisy, (0, pad_length))
-        elif length > self.segment_length:
-            # Random crop if too long
-            if self.train:
-                start = random.randint(0, length - self.segment_length)
-            else:
-                start = 0  # Use beginning for validation
-            clean = clean[start:start + self.segment_length]
-            noisy = noisy[start:start + self.segment_length]
+        # Random segment
+        max_start = len(clean) - self.segment_length
+        if self.mode == 'train':
+            start = random.randint(0, max_start)
+        else:
+            # Deterministic for validation/test
+            start = max_start // 2
+        
+        clean_seg = clean[start:start + self.segment_length]
+        noisy_seg = noisy[start:start + self.segment_length]
+        
+        return clean_seg, noisy_seg
+    
+    def _augment(
+        self,
+        clean: torch.Tensor,
+        noisy: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply data augmentation"""
+        # Random gain (only for training)
+        if random.random() < 0.3:
+            gain = random.uniform(0.8, 1.2)
+            clean = clean * gain
+            noisy = noisy * gain
         
         return clean, noisy
     
-    def _compute_stft(self, waveform: torch.Tensor) -> torch.Tensor:
-        """Compute STFT of waveform"""
-        stft_out = torch.stft(
-            waveform,
+    def _compute_stft(self, audio: torch.Tensor) -> torch.Tensor:
+        """
+        Compute STFT of audio
+        
+        Returns:
+            STFT tensor [freq_bins, time_frames, 2] (real, imag)
+        """
+        # Add batch dimension if needed
+        if audio.dim() == 1:
+            audio = audio.unsqueeze(0)
+        
+        # Compute STFT
+        stft = torch.stft(
+            audio,
             n_fft=self.n_fft,
             hop_length=self.hop_length,
             win_length=self.win_length,
@@ -258,36 +285,50 @@ class VoiceBankDEMANDDataset(Dataset):
             pad_mode='reflect'
         )
         
-        # Convert to real representation [freq, time, 2]
-        stft_real = torch.stack([stft_out.real, stft_out.imag], dim=-1)
+        # Convert to real representation [batch, freq, time, 2]
+        stft_real = torch.stack([stft.real, stft.imag], dim=-1)
         
-        return stft_real
+        return stft_real.squeeze(0)  # [freq, time, 2]
+    
+    def __len__(self) -> int:
+        return len(self.file_list)
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """Get a single sample"""
-        pair = self.file_pairs[idx]
+        clean_path, noisy_path = self.file_list[idx]
         
-        # Load audio files
-        clean = self._load_audio(pair['clean'])
-        noisy = self._load_audio(pair['noisy'])
+        # Load audio
+        clean = self._load_audio(clean_path)
+        noisy = self._load_audio(noisy_path)
         
         # Ensure same length
-        min_len = min(clean.shape[-1], noisy.shape[-1])
+        min_len = min(len(clean), len(noisy))
         clean = clean[:min_len]
         noisy = noisy[:min_len]
         
-        # Random crop to segment length
-        clean, noisy = self._random_crop(clean, noisy)
+        # Get segment
+        clean, noisy = self._get_segment(clean, noisy)
+        
+        # Apply augmentation (training only)
+        if self.augment:
+            clean, noisy = self._augment(clean, noisy)
+        
+        # QUAN TRỌNG: Normalize using global statistics
+        # Không chuẩn hóa theo từng file riêng lẻ!
+        clean_norm = self.normalizer.normalize(clean)
+        noisy_norm = self.normalizer.normalize(noisy)
         
         # Compute STFT
-        clean_stft = self._compute_stft(clean)
-        noisy_stft = self._compute_stft(noisy)
+        clean_stft = self._compute_stft(clean_norm)
+        noisy_stft = self._compute_stft(noisy_norm)
         
         return {
-            'clean': clean,
-            'noisy': noisy,
+            'clean': clean,  # Original scale (for metrics)
+            'noisy': noisy,  # Original scale (for metrics)
+            'clean_norm': clean_norm,  # Normalized
+            'noisy_norm': noisy_norm,  # Normalized
             'clean_stft': clean_stft,
-            'noisy_stft': noisy_stft
+            'noisy_stft': noisy_stft,
+            'filename': clean_path.name
         }
 
 
@@ -303,50 +344,73 @@ def create_dataloaders(
     n_fft: int = 512,
     hop_length: int = 128,
     win_length: int = 512,
-    pin_memory: bool = True
+    compute_normalizer: bool = True
 ) -> Tuple[DataLoader, DataLoader]:
     """
     Create train and validation dataloaders
     
     Args:
-        train_clean_dir: Path to clean training audio
-        train_noisy_dir: Path to noisy training audio
-        test_clean_dir: Path to clean test audio
-        test_noisy_dir: Path to noisy test audio
-        sample_rate: Audio sample rate
-        segment_length: Length of audio segments in samples
+        train_clean_dir: Directory with clean training audio
+        train_noisy_dir: Directory with noisy training audio  
+        test_clean_dir: Directory with clean test audio
+        test_noisy_dir: Directory with noisy test audio
+        sample_rate: Target sample rate
+        segment_length: Audio segment length
         batch_size: Batch size
         num_workers: Number of data loading workers
-        n_fft: FFT size for STFT
-        hop_length: Hop length for STFT
-        win_length: Window length for STFT
-        pin_memory: Pin memory for faster GPU transfer
+        n_fft: FFT size
+        hop_length: STFT hop length
+        win_length: STFT window length
+        compute_normalizer: Whether to compute global normalization statistics
     
     Returns:
-        train_loader: DataLoader for training
-        val_loader: DataLoader for validation
+        Tuple of (train_loader, val_loader)
     """
+    # Setup normalizer - compute from training data
+    stats_file = Path(train_clean_dir).parent / 'normalizer_stats.json'
+    
+    if compute_normalizer and not stats_file.exists():
+        print("Computing global normalization statistics from training data...")
+        global_mean, global_std = AudioNormalizer.compute_global_statistics(
+            train_clean_dir, sample_rate=sample_rate, max_files=500
+        )
+        normalizer = AudioNormalizer(global_mean=global_mean, global_std=global_std)
+        normalizer.save(str(stats_file))
+        print(f"Saved normalizer statistics to {stats_file}")
+    elif stats_file.exists():
+        print(f"Loading normalizer statistics from {stats_file}")
+        normalizer = AudioNormalizer.load(str(stats_file))
+        print(f"Global stats: mean={normalizer.global_mean:.6f}, std={normalizer.global_std:.6f}")
+    else:
+        # Use default values
+        normalizer = AudioNormalizer(global_mean=0.0, global_std=0.05)
+        print("Using default normalizer statistics")
+    
     # Create datasets
     train_dataset = VoiceBankDEMANDDataset(
         clean_dir=train_clean_dir,
         noisy_dir=train_noisy_dir,
         sample_rate=sample_rate,
         segment_length=segment_length,
+        mode='train',
         n_fft=n_fft,
         hop_length=hop_length,
         win_length=win_length,
-        train=True
+        normalizer=normalizer,
+        augment=True
     )
     
     val_dataset = VoiceBankDEMANDDataset(
         clean_dir=test_clean_dir,
         noisy_dir=test_noisy_dir,
         sample_rate=sample_rate,
-        segment_length=segment_length,
+        segment_length=None,  # Full audio for validation
+        mode='val',
         n_fft=n_fft,
         hop_length=hop_length,
         win_length=win_length,
-        train=False
+        normalizer=normalizer,  # Same normalizer!
+        augment=False
     )
     
     # Create dataloaders
@@ -355,21 +419,123 @@ def create_dataloaders(
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=pin_memory,
+        pin_memory=True,
         drop_last=True
     )
     
+    # Smaller batch size for validation (full length audio)
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
+        batch_size=1,  # Full length audio can vary
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=False
+        pin_memory=True
     )
     
-    print(f"\nDataloaders created:")
-    print(f"  Training: {len(train_dataset)} samples, {len(train_loader)} batches")
-    print(f"  Validation: {len(val_dataset)} samples, {len(val_loader)} batches")
-    
     return train_loader, val_loader
+
+
+def setup_gdrive_dataset(
+    gdrive_path: Optional[str] = None,
+    gdrive_folder_id: Optional[str] = None
+) -> Optional[Dict[str, str]]:
+    """
+    Setup dataset from Google Drive (for Google Colab)
+    
+    Args:
+        gdrive_path: Path to dataset folder in Google Drive
+        gdrive_folder_id: Google Drive folder ID
+    
+    Returns:
+        Dictionary with dataset paths or None if setup fails
+    """
+    try:
+        from google.colab import drive
+        
+        # Mount Google Drive
+        mount_point = '/content/drive'
+        if not os.path.ismount(mount_point):
+            print("Mounting Google Drive...")
+            drive.mount(mount_point)
+        
+        # Try different paths
+        possible_paths = []
+        
+        if gdrive_path:
+            possible_paths.append(gdrive_path)
+        
+        # Common locations
+        possible_paths.extend([
+            '/content/drive/MyDrive/speech_denoising_data',
+            '/content/drive/MyDrive/datasets/speech_denoising_data',
+            '/content/drive/MyDrive/VoiceBank_DEMAND'
+        ])
+        
+        data_root = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                data_root = path
+                print(f"Found dataset at: {data_root}")
+                break
+        
+        if data_root is None:
+            print("Could not find dataset in Google Drive.")
+            print("Tried paths:", possible_paths)
+            return None
+        
+        # Setup paths
+        paths = {
+            'train_clean_dir': os.path.join(data_root, 'clean_trainset_28spk_wav'),
+            'train_noisy_dir': os.path.join(data_root, 'noisy_trainset_28spk_wav'),
+            'test_clean_dir': os.path.join(data_root, 'clean_testset_wav'),
+            'test_noisy_dir': os.path.join(data_root, 'noisy_testset_wav')
+        }
+        
+        # Verify paths exist
+        for name, path in paths.items():
+            if not os.path.exists(path):
+                print(f"Warning: {name} not found at {path}")
+        
+        return paths
+        
+    except ImportError:
+        print("Not running in Google Colab environment.")
+        return None
+    except Exception as e:
+        print(f"Error setting up Google Drive dataset: {e}")
+        return None
+
+
+if __name__ == '__main__':
+    # Test dataset
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--clean_dir', type=str, default='./data/clean_trainset_28spk_wav')
+    parser.add_argument('--noisy_dir', type=str, default='./data/noisy_trainset_28spk_wav')
+    args = parser.parse_args()
+    
+    # Compute global statistics
+    if os.path.exists(args.clean_dir):
+        mean, std = AudioNormalizer.compute_global_statistics(args.clean_dir)
+        print(f"Global mean: {mean:.6f}")
+        print(f"Global std: {std:.6f}")
+        
+        # Test dataset
+        normalizer = AudioNormalizer(global_mean=mean, global_std=std)
+        dataset = VoiceBankDEMANDDataset(
+            clean_dir=args.clean_dir,
+            noisy_dir=args.noisy_dir,
+            normalizer=normalizer
+        )
+        
+        print(f"\nDataset size: {len(dataset)}")
+        
+        sample = dataset[0]
+        print(f"Clean shape: {sample['clean'].shape}")
+        print(f"Noisy shape: {sample['noisy'].shape}")
+        print(f"Clean STFT shape: {sample['clean_stft'].shape}")
+        print(f"Noisy STFT shape: {sample['noisy_stft'].shape}")
+    else:
+        print(f"Directory not found: {args.clean_dir}")
+        print("Please download the dataset first: python download_dataset.py")

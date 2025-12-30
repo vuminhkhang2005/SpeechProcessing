@@ -25,12 +25,17 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 
 from models.unet import UNetDenoiser, load_model_checkpoint, convert_old_checkpoint, detect_encoder_channels_from_checkpoint
-from utils.audio_utils import AudioProcessor, load_audio, save_audio
+from utils.audio_utils import AudioProcessor, load_audio, save_audio, match_rms_level
 
 
 class SpeechDenoiser:
     """
     Speech Denoiser for inference
+    
+    CẢI TIẾN:
+    - Hỗ trợ match amplitude với input
+    - Có thể normalize output theo target dB
+    - Tránh volume quá nhỏ sau khi denoise
     """
     
     def __init__(
@@ -40,7 +45,9 @@ class SpeechDenoiser:
         n_fft: int = 512,
         hop_length: int = 128,
         win_length: int = 512,
-        sample_rate: int = 16000
+        sample_rate: int = 16000,
+        match_input_volume: bool = True,  # CẢI TIẾN: match volume với input
+        target_db: Optional[float] = None  # CẢI TIẾN: target dB level
     ):
         """
         Args:
@@ -50,6 +57,8 @@ class SpeechDenoiser:
             hop_length: Hop length for STFT
             win_length: Window length for STFT
             sample_rate: Target sample rate
+            match_input_volume: Match output volume with input (recommended!)
+            target_db: Target dB level for output (e.g., -25). Ignored if match_input_volume=True
         """
         # Set device
         if device is None:
@@ -61,6 +70,8 @@ class SpeechDenoiser:
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
+        self.match_input_volume = match_input_volume
+        self.target_db = target_db
         
         # Audio processor
         self.audio_processor = AudioProcessor(
@@ -75,6 +86,9 @@ class SpeechDenoiser:
         self.model.eval()
         
         print(f"Model loaded on {self.device}")
+        print(f"  Match input volume: {self.match_input_volume}")
+        if self.target_db:
+            print(f"  Target dB: {self.target_db}")
     
     def _load_model(self, checkpoint_path: str) -> torch.nn.Module:
         """Load model from checkpoint with automatic format conversion"""
@@ -142,19 +156,30 @@ class SpeechDenoiser:
             return model
     
     @torch.no_grad()
-    def denoise(self, waveform: torch.Tensor) -> torch.Tensor:
+    def denoise(
+        self, 
+        waveform: torch.Tensor,
+        match_volume: Optional[bool] = None
+    ) -> torch.Tensor:
         """
         Denoise audio waveform
         
+        CẢI TIẾN: Match amplitude với input để tránh volume quá nhỏ
+        
         Args:
             waveform: Input waveform [samples] or [batch, samples]
+            match_volume: Override match_input_volume setting
         
         Returns:
             Denoised waveform
         """
         # Ensure batch dimension
-        if waveform.dim() == 1:
+        single_sample = waveform.dim() == 1
+        if single_sample:
             waveform = waveform.unsqueeze(0)
+        
+        # Lưu lại input để match volume sau
+        input_waveform = waveform.clone()
         
         waveform = waveform.to(self.device)
         
@@ -169,21 +194,42 @@ class SpeechDenoiser:
         enhanced_stft = enhanced_stft.permute(0, 2, 3, 1)  # [batch, freq, time, 2]
         enhanced_wav = self.audio_processor.istft(enhanced_stft)
         
-        return enhanced_wav.squeeze(0)
+        # CẢI TIẾN: Match volume với input để tránh output quá nhỏ
+        should_match = match_volume if match_volume is not None else self.match_input_volume
+        
+        if should_match:
+            # Match RMS level với input
+            enhanced_wav = enhanced_wav.cpu()
+            input_np = input_waveform.numpy()
+            enhanced_np = enhanced_wav.numpy()
+            
+            for i in range(enhanced_np.shape[0]):
+                enhanced_np[i] = match_rms_level(enhanced_np[i], input_np[i])
+            
+            enhanced_wav = torch.from_numpy(enhanced_np)
+        
+        if single_sample:
+            enhanced_wav = enhanced_wav.squeeze(0)
+        
+        return enhanced_wav
     
     def denoise_file(
         self,
         input_path: str,
         output_path: str,
-        chunk_size: Optional[int] = None
+        chunk_size: Optional[int] = None,
+        preserve_volume: bool = True
     ) -> dict:
         """
         Denoise an audio file
+        
+        CẢI TIẾN: Giữ nguyên volume của input
         
         Args:
             input_path: Path to input audio file
             output_path: Path to save denoised audio
             chunk_size: Process audio in chunks (for long files)
+            preserve_volume: Match output volume with input (recommended!)
         
         Returns:
             Dictionary with processing info
@@ -194,18 +240,36 @@ class SpeechDenoiser:
         waveform, sr = load_audio(input_path, self.sample_rate)
         original_length = len(waveform)
         
+        # Lưu reference để match volume
+        input_numpy = waveform.numpy() if isinstance(waveform, torch.Tensor) else waveform
+        
         # Process
         if chunk_size is None or len(waveform) <= chunk_size:
-            enhanced = self.denoise(waveform)
+            enhanced = self.denoise(waveform, match_volume=preserve_volume)
         else:
             # Process in chunks for long audio
             enhanced = self._denoise_chunks(waveform, chunk_size)
+            
+            # Match volume với input sau khi xử lý chunks
+            if preserve_volume:
+                enhanced_np = enhanced.numpy() if isinstance(enhanced, torch.Tensor) else enhanced
+                enhanced_np = match_rms_level(enhanced_np, input_numpy[:len(enhanced_np)])
+                enhanced = torch.from_numpy(enhanced_np) if isinstance(enhanced, torch.Tensor) else enhanced_np
         
         # Trim to original length
         enhanced = enhanced[:original_length]
         
-        # Save
-        save_audio(output_path, enhanced, self.sample_rate)
+        # Save với reference để đảm bảo volume
+        enhanced_np = enhanced.numpy() if isinstance(enhanced, torch.Tensor) else enhanced
+        save_audio(
+            output_path, 
+            enhanced_np, 
+            self.sample_rate,
+            normalize=True,
+            target_db=self.target_db,
+            prevent_clipping=True,
+            reference_waveform=input_numpy if preserve_volume else None
+        )
         
         processing_time = time.time() - start_time
         rtf = processing_time / (original_length / self.sample_rate)
@@ -215,7 +279,8 @@ class SpeechDenoiser:
             'output_path': output_path,
             'duration': original_length / self.sample_rate,
             'processing_time': processing_time,
-            'rtf': rtf  # Real-time factor
+            'rtf': rtf,  # Real-time factor
+            'volume_preserved': preserve_volume
         }
     
     def _denoise_chunks(
@@ -355,7 +420,18 @@ def main():
     parser.add_argument('--chunk_size', type=int, default=160000,
                         help='Chunk size for processing (10 seconds at 16kHz)')
     
+    # CẢI TIẾN: Options cho volume handling
+    parser.add_argument('--preserve_volume', action='store_true', default=True,
+                        help='Match output volume with input (default: True)')
+    parser.add_argument('--no_preserve_volume', action='store_true',
+                        help='Do not match output volume with input')
+    parser.add_argument('--target_db', type=float, default=None,
+                        help='Target dB level for output (e.g., -25)')
+    
     args = parser.parse_args()
+    
+    # Handle preserve_volume flag
+    preserve_volume = not args.no_preserve_volume
     
     # Validate arguments
     if args.input is None and args.input_dir is None:
@@ -370,7 +446,9 @@ def main():
     # Create denoiser
     denoiser = SpeechDenoiser(
         checkpoint_path=args.checkpoint,
-        device=args.device
+        device=args.device,
+        match_input_volume=preserve_volume,
+        target_db=args.target_db
     )
     
     # Process
@@ -379,12 +457,14 @@ def main():
         print(f"\nProcessing: {args.input}")
         result = denoiser.denoise_file(
             args.input, args.output,
-            chunk_size=args.chunk_size
+            chunk_size=args.chunk_size,
+            preserve_volume=preserve_volume
         )
         print(f"Output saved to: {result['output_path']}")
         print(f"Duration: {result['duration']:.2f}s")
         print(f"Processing time: {result['processing_time']:.2f}s")
         print(f"Real-time factor: {result['rtf']:.2f}x")
+        print(f"Volume preserved: {result['volume_preserved']}")
     else:
         # Directory
         print(f"\nProcessing directory: {args.input_dir}")

@@ -156,24 +156,134 @@ def load_audio(
 def save_audio(
     filepath: str,
     waveform: torch.Tensor,
-    sample_rate: int = 16000
+    sample_rate: int = 16000,
+    normalize: bool = True,
+    target_db: Optional[float] = None,
+    prevent_clipping: bool = True,
+    reference_waveform: Optional[np.ndarray] = None
 ):
     """
-    Save audio to file
+    Save audio to file với xử lý amplitude tốt hơn
+    
+    CẢI TIẾN:
+    - Có thể normalize theo target dB level
+    - Có thể match amplitude với reference (input signal)
+    - Tránh clipping một cách thông minh
     
     Args:
         filepath: Output path
         waveform: Audio tensor
         sample_rate: Sample rate
+        normalize: Whether to normalize audio
+        target_db: Target dB level (e.g., -25 dB). If None, uses peak normalization
+        prevent_clipping: Prevent clipping by limiting to [-1, 1]
+        reference_waveform: Reference waveform to match RMS level (e.g., input signal)
     """
     if isinstance(waveform, torch.Tensor):
         waveform = waveform.cpu().numpy()
     
-    # Normalize to prevent clipping
-    if np.abs(waveform).max() > 1.0:
-        waveform = waveform / np.abs(waveform).max()
+    if normalize:
+        if reference_waveform is not None:
+            # Match RMS level với reference signal
+            # Đây là cách tốt nhất để giữ volume consistent
+            waveform = match_rms_level(waveform, reference_waveform)
+        elif target_db is not None:
+            # Normalize theo target dB level
+            waveform = normalize_to_db(waveform, target_db)
+        else:
+            # Peak normalize to prevent clipping
+            peak = np.abs(waveform).max()
+            if peak > 1.0:
+                waveform = waveform / peak * 0.95  # Leave some headroom
+    
+    if prevent_clipping:
+        # Soft clipping để tránh harsh distortion
+        waveform = soft_clip(waveform, threshold=0.95)
     
     sf.write(filepath, waveform, sample_rate)
+
+
+def match_rms_level(
+    audio: np.ndarray,
+    reference: np.ndarray,
+    eps: float = 1e-8
+) -> np.ndarray:
+    """
+    Match RMS level của audio với reference
+    
+    QUAN TRỌNG cho inference: Đảm bảo output có volume tương tự input
+    
+    Args:
+        audio: Audio to adjust
+        reference: Reference audio
+        eps: Small constant to prevent division by zero
+    
+    Returns:
+        Audio with matched RMS level
+    """
+    audio_rms = np.sqrt(np.mean(audio ** 2) + eps)
+    ref_rms = np.sqrt(np.mean(reference ** 2) + eps)
+    
+    # Scale audio to match reference RMS
+    gain = ref_rms / audio_rms
+    
+    return audio * gain
+
+
+def normalize_to_db(
+    audio: np.ndarray,
+    target_db: float = -25.0,
+    eps: float = 1e-8
+) -> np.ndarray:
+    """
+    Normalize audio to target dB level (RMS-based)
+    
+    Args:
+        audio: Audio array
+        target_db: Target dB level
+        eps: Small constant to prevent log of zero
+    
+    Returns:
+        Normalized audio
+    """
+    rms = np.sqrt(np.mean(audio ** 2) + eps)
+    current_db = 20 * np.log10(rms + eps)
+    gain = 10 ** ((target_db - current_db) / 20)
+    
+    return audio * gain
+
+
+def soft_clip(
+    audio: np.ndarray,
+    threshold: float = 0.95
+) -> np.ndarray:
+    """
+    Soft clipping để tránh harsh distortion
+    
+    Sử dụng tanh-based soft clipping thay vì hard clipping
+    
+    Args:
+        audio: Audio array
+        threshold: Threshold where soft clipping starts
+    
+    Returns:
+        Soft-clipped audio
+    """
+    peak = np.abs(audio).max()
+    
+    if peak <= threshold:
+        return audio
+    
+    # Apply tanh soft clipping for values above threshold
+    # This creates a smoother transition than hard clipping
+    scale = threshold / np.tanh(1.0)
+    clipped = np.where(
+        np.abs(audio) > threshold,
+        np.sign(audio) * scale * np.tanh(np.abs(audio) / scale),
+        audio
+    )
+    
+    return clipped
 
 
 def normalize_audio(waveform: torch.Tensor, target_db: float = -25.0) -> torch.Tensor:

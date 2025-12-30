@@ -499,9 +499,20 @@ class EnergyConservationLoss(nn.Module):
     
     Ý tưởng: Năng lượng của output không được nhỏ hơn quá nhiều so với 
     năng lượng của clean signal
+    
+    CẢI TIẾN:
+    - Giảm min_ratio xuống để cho phép một chút giảm volume (do lọc noise)
+    - Thêm soft penalty thay vì hard threshold
     """
     
-    def __init__(self, min_ratio: float = 0.7, max_ratio: float = 1.3):
+    def __init__(self, min_ratio: float = 0.6, max_ratio: float = 1.4):
+        """
+        Args:
+            min_ratio: Minimum allowed energy ratio (output/target)
+                       0.6 = cho phép output có năng lượng tối thiểu 60% so với target
+            max_ratio: Maximum allowed energy ratio
+                       1.4 = cho phép output có năng lượng tối đa 140% so với target
+        """
         super().__init__()
         self.min_ratio = min_ratio
         self.max_ratio = max_ratio
@@ -513,22 +524,34 @@ class EnergyConservationLoss(nn.Module):
     ) -> torch.Tensor:
         """
         Phạt nếu tỷ lệ năng lượng pred/target nằm ngoài [min_ratio, max_ratio]
+        
+        Sử dụng smooth L1 penalty thay vì hard ReLU để gradient ổn định hơn
         """
         if pred.dim() == 3:
             pred = pred.squeeze(1)
         if target.dim() == 3:
             target = target.squeeze(1)
             
-        pred_energy = torch.sum(pred ** 2, dim=-1)
-        target_energy = torch.sum(target ** 2, dim=-1) + 1e-8
+        # Tính RMS thay vì total energy (tránh vấn đề với độ dài khác nhau)
+        pred_rms = torch.sqrt(torch.mean(pred ** 2, dim=-1) + 1e-8)
+        target_rms = torch.sqrt(torch.mean(target ** 2, dim=-1) + 1e-8)
         
-        ratio = pred_energy / target_energy
+        ratio = pred_rms / target_rms
         
+        # Soft penalty sử dụng Smooth L1
         # Phạt nếu ratio < min_ratio (output quá nhỏ)
-        low_penalty = F.relu(self.min_ratio - ratio)
+        low_penalty = F.smooth_l1_loss(
+            ratio.clamp(max=self.min_ratio),
+            torch.full_like(ratio, self.min_ratio),
+            reduction='none'
+        ) * (ratio < self.min_ratio).float()
         
         # Phạt nếu ratio > max_ratio (output quá lớn)  
-        high_penalty = F.relu(ratio - self.max_ratio)
+        high_penalty = F.smooth_l1_loss(
+            ratio.clamp(min=self.max_ratio),
+            torch.full_like(ratio, self.max_ratio),
+            reduction='none'
+        ) * (ratio > self.max_ratio).float()
         
         return (low_penalty + high_penalty).mean()
 

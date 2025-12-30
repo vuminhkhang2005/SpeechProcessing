@@ -67,14 +67,17 @@ class Trainer:
             weight_decay=train_cfg.get('weight_decay', 1e-5)
         )
         
-        # Scheduler
+        # Scheduler - CẢI TIẾN: ReduceLROnPlateau với verbose logging
         scheduler_cfg = train_cfg.get('scheduler', {})
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode='min',
             factor=scheduler_cfg.get('factor', 0.5),
-            patience=scheduler_cfg.get('patience', 5),
-            min_lr=scheduler_cfg.get('min_lr', 1e-6)
+            patience=scheduler_cfg.get('patience', 7),  # Tăng từ 5 lên 7
+            min_lr=scheduler_cfg.get('min_lr', 1e-6),
+            threshold=1e-4,  # Minimum improvement to be considered
+            cooldown=scheduler_cfg.get('cooldown', 2),  # Epochs to wait after LR reduction
+            verbose=True  # Log when LR changes
         )
         
         # Loss function - CẢI TIẾN VỚI SI-SDR để ngăn lazy learning
@@ -121,10 +124,13 @@ class Trainer:
         self.save_every = ckpt_cfg.get('save_every', 5)
         self.keep_last = ckpt_cfg.get('keep_last', 3)
         
-        # Early stopping
-        self.early_stopping_patience = train_cfg.get('early_stopping_patience', 15)
+        # Early stopping - CẢI TIẾN: tăng patience và restore_best_weights
+        self.early_stopping_patience = train_cfg.get('early_stopping_patience', 20)
+        self.early_stopping_min_delta = train_cfg.get('early_stopping_min_delta', 1e-4)
         self.best_val_loss = float('inf')
         self.patience_counter = 0
+        self.restore_best_weights = train_cfg.get('restore_best_weights', True)
+        self.best_model_state = None  # Lưu trọng số tốt nhất trong memory
         
         # Training state
         self.current_epoch = 0
@@ -148,8 +154,10 @@ class Trainer:
         
         for batch in pbar:
             # Move to device
+            # Sử dụng normalized STFT cho training
             noisy_stft = batch['noisy_stft'].to(self.device)
             clean_stft = batch['clean_stft'].to(self.device)
+            # Sử dụng original waveform cho metrics (không normalized)
             noisy_wav = batch['noisy'].to(self.device)
             clean_wav = batch['clean'].to(self.device)
             
@@ -397,13 +405,23 @@ class Trainer:
             for key, value in val_results.items():
                 self.writer.add_scalar(f'epoch/val_{key}', value, epoch)
             
-            # Check for improvement
-            is_best = val_loss < self.best_val_loss
+            # Check for improvement - CẢI TIẾN: thêm min_delta
+            improvement = self.best_val_loss - val_loss
+            is_best = improvement > self.early_stopping_min_delta
+            
             if is_best:
                 self.best_val_loss = val_loss
                 self.patience_counter = 0
+                
+                # Lưu trọng số tốt nhất vào memory (restore_best_weights)
+                if self.restore_best_weights:
+                    self.best_model_state = {
+                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
+                    }
+                    print(f"  💾 Saved best model state (val_loss improved by {improvement:.4f})")
             else:
                 self.patience_counter += 1
+                print(f"  ⏳ No improvement for {self.patience_counter}/{self.early_stopping_patience} epochs")
             
             # Save checkpoint
             if (epoch + 1) % self.save_every == 0 or is_best:
@@ -411,14 +429,34 @@ class Trainer:
             
             # Early stopping
             if self.patience_counter >= self.early_stopping_patience:
-                print(f"\nEarly stopping at epoch {epoch}")
+                print(f"\n⛔ Early stopping triggered at epoch {epoch}")
+                
+                # QUAN TRỌNG: Restore best weights trước khi kết thúc
+                if self.restore_best_weights and self.best_model_state is not None:
+                    print("🔄 Restoring best model weights...")
+                    self.model.load_state_dict(self.best_model_state)
+                    # Lưu lại checkpoint với best weights
+                    self.save_checkpoint(is_best=True)
+                    print("✅ Best model weights restored and saved!")
+                
                 break
         
+        # Training completed - restore best weights nếu chưa
+        if self.restore_best_weights and self.best_model_state is not None:
+            current_loss = val_loss
+            if current_loss > self.best_val_loss:
+                print("\n🔄 Final: Restoring best model weights...")
+                self.model.load_state_dict(self.best_model_state)
+                self.save_checkpoint(is_best=True)
+        
         self.writer.close()
-        print("\nTraining completed!")
+        print("\n" + "="*60)
+        print("TRAINING COMPLETED!")
+        print("="*60)
         print(f"Best validation loss: {self.best_val_loss:.4f}")
         print(f"Checkpoints saved to: {self.ckpt_dir}")
         print(f"Logs saved to: {self.log_dir}")
+        print("="*60)
 
 
 def load_config(config_path: str) -> dict:
