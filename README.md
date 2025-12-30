@@ -14,6 +14,9 @@ This project implements a **speech enhancement/denoising** system that removes b
 - **Complex Ratio Mask (CRM)**: Applies learned masks to both real and imaginary STFT components
 - **Self-Attention**: Optional attention mechanism in the bottleneck for capturing long-range dependencies
 - **Multi-Resolution STFT Loss**: Combined L1 and spectral loss for better perceptual quality
+- **Anti-Lazy Learning**: SI-SDR loss và Energy Conservation Loss để ngăn model chỉ giảm volume
+- **Global Normalization**: Chuẩn hóa theo mean/std của training set (theo khuyến cáo của LeCun)
+- **Post-Processing**: Amplitude matching để output có cùng loudness với input
 - **GUI Application**: User-friendly interface built with tkinter
 - **Real-time Demo**: Live microphone denoising capability
 
@@ -250,6 +253,59 @@ speech_denoising/
 ├── requirements.txt
 └── README.md
 ```
+
+## Anti-Lazy Learning Features
+
+Vấn đề "lazy learning" xảy ra khi model học cách giảm volume thay vì thực sự lọc noise (vì giảm volume cũng giảm loss). Dự án này đã được cải tiến với các tính năng sau:
+
+### 1. SI-SDR Loss (Scale-Invariant Signal-to-Distortion Ratio)
+- **Quan trọng nhất**: SI-SDR không bị đánh lừa bởi volume reduction
+- Scale-invariant: Chỉ quan tâm chất lượng, không quan tâm âm lượng
+- Cấu hình: `si_sdr_weight: 0.5` trong config.yaml
+
+### 2. Energy Conservation Loss
+- Phạt model nếu năng lượng output khác quá nhiều so với target
+- Ngăn model giảm volume quá nhiều (ratio phải trong [0.6, 1.4])
+- Cấu hình: `energy_weight: 0.1` trong config.yaml
+
+### 3. Global Normalization
+- Chuẩn hóa theo mean/std của toàn bộ training set
+- Không dùng per-file peak normalization (gây inconsistent)
+- Statistics được lưu và sử dụng lại cho inference
+
+### 4. Post-Processing Amplitude Matching
+- Output được match loudness với input
+- Tránh vấn đề "âm lượng giảm" sau khử nhiễu
+- Có thể bật/tắt: `--match_loudness` trong inference.py
+
+### Kiểm tra Lazy Learning
+
+```bash
+python test_model_quality.py --checkpoint checkpoints/best_model.pt
+```
+
+Script này sẽ:
+- Tính Energy Ratio (nên gần 1.0)
+- Tính Noise Reduction (nên > 50%)
+- Tính SI-SDR improvement (nên > 3 dB)
+- Chẩn đoán và đề xuất cách sửa
+
+## Training Tips
+
+### Tối ưu EarlyStopping
+- Tăng `patience` lên 15-20 để tránh dừng sớm
+- Bật `restore_best_weights: true`
+- Train ít nhất 100-150 epochs
+
+### Kiểm tra Loss Function
+- Nếu model giảm volume: tăng `si_sdr_weight` và `energy_weight`
+- Nếu output méo tiếng: giảm `magnitude_weight`, tăng `time_l1_weight`
+- Theo dõi cả val_loss và SI-SDR improvement
+
+### Data Normalization
+- KHÔNG dùng peak normalization per-file
+- Dùng global normalization (mean=0, std=1)
+- Đảm bảo clean/noisy pairs được align đúng
 
 ## Notes
 

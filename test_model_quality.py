@@ -9,10 +9,17 @@ Các tiêu chí kiểm tra:
 2. Noise Reduction: Lượng noise được loại bỏ (nên > 50%)
 3. SI-SDR: Chất lượng tín hiệu (càng cao càng tốt)
 4. STOI: Độ hiểu của giọng nói (càng cao càng tốt)
+5. PESQ: Perceptual quality (nếu có cài đặt)
+
+Cải tiến:
+- Sử dụng librosa thay vì torchaudio (Google Colab compatible)
+- Thêm STOI và PESQ metrics
+- Thêm post-processing detection
+- Thêm volume matching analysis
 
 Cách sử dụng:
     python test_model_quality.py --checkpoint checkpoints/best_model.pt
-    python test_model_quality.py --checkpoint checkpoints/best_model.pt --audio test.wav
+    python test_model_quality.py --checkpoint checkpoints/best_model.pt --noisy test.wav --clean clean.wav
 """
 
 import argparse
@@ -20,14 +27,15 @@ import sys
 from pathlib import Path
 import numpy as np
 import torch
-import torchaudio
+import librosa
+import soundfile as sf
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from models.unet import load_model_checkpoint
-from utils.audio_utils import AudioProcessor
-from utils.metrics import calculate_si_sdr
+from utils.audio_utils import AudioProcessor, post_process_denoised, match_amplitude
+from utils.metrics import calculate_si_sdr, calculate_stoi, is_pesq_available, calculate_pesq
 
 
 def calculate_energy(signal: np.ndarray) -> float:
@@ -97,6 +105,27 @@ def diagnose_lazy_learning(
     results['correlation_with_clean'] = np.corrcoef(output.flatten(), clean.flatten())[0, 1]
     results['correlation_with_noisy'] = np.corrcoef(output.flatten(), noisy.flatten())[0, 1]
     
+    # 6. STOI (Short-Time Objective Intelligibility)
+    try:
+        results['stoi_input'] = calculate_stoi(clean, noisy, sample_rate)
+        results['stoi_output'] = calculate_stoi(clean, output, sample_rate)
+        results['stoi_improvement'] = results['stoi_output'] - results['stoi_input']
+    except Exception as e:
+        print(f"   STOI calculation failed: {e}")
+        results['stoi_input'] = 0.0
+        results['stoi_output'] = 0.0
+        results['stoi_improvement'] = 0.0
+    
+    # 7. PESQ (if available)
+    if is_pesq_available():
+        try:
+            results['pesq_input'] = calculate_pesq(clean, noisy, sample_rate)
+            results['pesq_output'] = calculate_pesq(clean, output, sample_rate)
+            if results['pesq_input'] and results['pesq_output']:
+                results['pesq_improvement'] = results['pesq_output'] - results['pesq_input']
+        except Exception as e:
+            print(f"   PESQ calculation failed: {e}")
+    
     return results
 
 
@@ -136,7 +165,31 @@ def interpret_results(results: dict) -> str:
     else:
         good_signs.append(f"✅ SI-SDR cải thiện: +{sdr_improvement:.2f} dB")
     
-    # 4. Check correlation pattern
+    # 4. Check STOI improvement (if available)
+    if 'stoi_improvement' in results and results.get('stoi_output', 0) > 0:
+        stoi_improvement = results['stoi_improvement']
+        stoi_output = results['stoi_output']
+        if stoi_improvement < -0.05:
+            issues.append(f"⚠️ STOI giảm {abs(stoi_improvement):.3f}! Độ hiểu giảm!")
+        elif stoi_output > 0.9:
+            good_signs.append(f"✅ STOI rất tốt: {stoi_output:.3f} (cải thiện +{stoi_improvement:.3f})")
+        elif stoi_output > 0.7:
+            good_signs.append(f"✅ STOI khá: {stoi_output:.3f}")
+        else:
+            issues.append(f"⚠️ STOI thấp: {stoi_output:.3f}")
+    
+    # 5. Check PESQ improvement (if available)
+    if 'pesq_improvement' in results:
+        pesq_improvement = results['pesq_improvement']
+        pesq_output = results.get('pesq_output', 0)
+        if pesq_improvement < -0.2:
+            issues.append(f"⚠️ PESQ giảm {abs(pesq_improvement):.2f}!")
+        elif pesq_output > 3.5:
+            good_signs.append(f"✅ PESQ tốt: {pesq_output:.2f} (cải thiện +{pesq_improvement:.2f})")
+        elif pesq_output > 2.5:
+            good_signs.append(f"✅ PESQ khá: {pesq_output:.2f}")
+    
+    # 6. Check correlation pattern
     corr_clean = results['correlation_with_clean']
     corr_noisy = results['correlation_with_noisy']
     
@@ -168,15 +221,23 @@ def interpret_results(results: dict) -> str:
             interpretation += """
    1. Sử dụng SI-SDR loss (đã được thêm vào models/loss.py)
    2. Tăng si_sdr_weight trong config.yaml (0.5 → 1.0)
-   3. Train lâu hơn (50-100 epochs)
+   3. Train lâu hơn (100-150 epochs)
    4. Giảm learning rate (0.0001 → 0.00005)
    5. Kiểm tra dataset có đúng không (clean phải thực sự sạch)
+   6. Tăng energy_weight trong config.yaml (0.1 → 0.2)
 """
         elif any("cải thiện ít" in i for i in issues):
             interpretation += """
-   1. Train thêm epochs
-   2. Tăng model capacity (thêm channels)
+   1. Train thêm epochs (100-150 epochs)
+   2. Tăng model capacity (encoder_channels lớn hơn)
    3. Kiểm tra xem val_loss có đang giảm không
+   4. Thử tăng learning rate một chút
+"""
+        elif any("STOI" in i or "PESQ" in i for i in issues):
+            interpretation += """
+   1. Model có thể đang over-smooth tín hiệu
+   2. Thử giảm magnitude_weight, tăng si_sdr_weight
+   3. Kiểm tra STFT parameters (n_fft, hop_length)
 """
     else:
         interpretation += "🎉 Model hoạt động tốt!\n"
@@ -189,27 +250,38 @@ def process_file(
     audio_processor: AudioProcessor,
     input_path: str,
     clean_path: str = None,
-    device: torch.device = None
+    device: torch.device = None,
+    apply_postprocess: bool = True
 ) -> dict:
-    """Process a single file and run diagnostics"""
+    """
+    Process a single file and run diagnostics
+    
+    Args:
+        model: UNet model
+        audio_processor: AudioProcessor instance
+        input_path: Path to noisy audio
+        clean_path: Path to clean reference (optional)
+        device: Torch device
+        apply_postprocess: Apply post-processing to match input loudness
+    
+    Returns:
+        Dictionary with audio arrays and diagnostics
+    """
     
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Load noisy audio
-    noisy_wav, sr = torchaudio.load(input_path)
-    if sr != 16000:
-        noisy_wav = torchaudio.functional.resample(noisy_wav, sr, 16000)
-    noisy_wav = noisy_wav.mean(dim=0, keepdim=True)  # Mono
+    # Load noisy audio using librosa (Google Colab compatible)
+    noisy_np, sr = librosa.load(input_path, sr=16000, mono=True)
+    noisy_wav = torch.from_numpy(noisy_np).float().unsqueeze(0)  # [1, samples]
     
     # Load clean audio if available
     if clean_path and Path(clean_path).exists():
-        clean_wav, sr = torchaudio.load(clean_path)
-        if sr != 16000:
-            clean_wav = torchaudio.functional.resample(clean_wav, sr, 16000)
-        clean_wav = clean_wav.mean(dim=0, keepdim=True)
+        clean_np, _ = librosa.load(clean_path, sr=16000, mono=True)
+        clean_wav = torch.from_numpy(clean_np).float().unsqueeze(0)
     else:
         clean_wav = None
+        clean_np = None
         print("⚠️ Không có clean reference, một số metrics sẽ không tính được")
     
     # Process with model
@@ -224,7 +296,6 @@ def process_file(
         output_wav = audio_processor.istft(pred_stft)
     
     # Convert to numpy
-    noisy_np = noisy_wav.numpy().flatten()
     output_np = output_wav.numpy().flatten()
     
     # Ensure same length
@@ -232,15 +303,35 @@ def process_file(
     noisy_np = noisy_np[:min_len]
     output_np = output_np[:min_len]
     
+    # Apply post-processing to match input loudness
+    # Điều này giúp tránh vấn đề "âm lượng giảm" sau khử nhiễu
+    if apply_postprocess:
+        output_np_original = output_np.copy()
+        output_np = match_amplitude(output_np, noisy_np, method='rms')
+        
+        # Report loudness change
+        rms_before = calculate_rms(output_np_original)
+        rms_after = calculate_rms(output_np)
+        if abs(rms_after - rms_before) / (rms_before + 1e-8) > 0.1:
+            print(f"   📊 Post-processing: amplitude adjusted by {(rms_after/rms_before - 1)*100:+.1f}%")
+    
     results = {
         'noisy': noisy_np,
-        'output': output_np
+        'output': output_np,
+        'output_raw': output_np_original if apply_postprocess else output_np
     }
     
-    if clean_wav is not None:
-        clean_np = clean_wav.numpy().flatten()[:min_len]
+    if clean_np is not None:
+        clean_np = clean_np[:min_len]
         results['clean'] = clean_np
+        
+        # Run diagnostics on BOTH raw and post-processed output
         results['diagnostics'] = diagnose_lazy_learning(noisy_np, clean_np, output_np)
+        
+        if apply_postprocess:
+            results['diagnostics_raw'] = diagnose_lazy_learning(
+                noisy_np, clean_np, output_np_original if apply_postprocess else output_np
+            )
     
     return results
 
@@ -307,9 +398,15 @@ def main():
         
         # Save output if requested
         if args.save_output:
-            output_tensor = torch.from_numpy(results['output']).unsqueeze(0)
-            torchaudio.save(args.save_output, output_tensor, 16000)
+            # Use soundfile for saving (Google Colab compatible)
+            sf.write(args.save_output, results['output'], 16000)
             print(f"\n💾 Output saved to: {args.save_output}")
+            
+            # Also save raw (before post-processing) for comparison
+            if 'output_raw' in results:
+                raw_path = args.save_output.replace('.wav', '_raw.wav')
+                sf.write(raw_path, results['output_raw'], 16000)
+                print(f"💾 Raw output saved to: {raw_path}")
     
     else:
         # Batch mode - test multiple files

@@ -1,4 +1,10 @@
 # Speech Denoising Configuration
+# 
+# CẢI TIẾN: 
+# - Tăng số epoch lên 150 để model có thời gian học tốt hơn
+# - Tăng early_stopping_patience lên 20 để tránh dừng sớm
+# - Thêm restore_best_weights
+# - Cải tiến loss function để ngăn lazy learning
 
 # Dataset paths
 # Option 1: Local paths (default)
@@ -26,6 +32,9 @@ data:
   sample_rate: 16000
   segment_length: 32000  # 2 seconds at 16kHz
   
+  # Data augmentation
+  augment: true
+  
 # STFT parameters
 stft:
   n_fft: 512
@@ -35,35 +44,63 @@ stft:
 # Model parameters
 model:
   name: "UNetDenoiser"
-  # Encoder channels
-  encoder_channels: [1, 32, 64, 128, 256, 512]
-  # Use attention in bottleneck
+  # Encoder channels - đã tối ưu cho speech enhancement
+  # Không nên dùng Dense layers cho audio - U-Net với Conv2D là chuẩn
+  encoder_channels: [32, 64, 128, 256, 512]
+  # Use attention in bottleneck - giúp capture long-range dependencies
   use_attention: true
   # Dropout rate
   dropout: 0.1
+  # Mask type: 'CRM' (Complex Ratio Mask) hoặc 'IRM' (Ideal Ratio Mask)
+  # CRM với Tanh activation tốt hơn cho complex STFT
+  mask_type: "CRM"
 
 # Training parameters
 training:
   batch_size: 16
-  num_epochs: 100
+  # QUAN TRỌNG: Tăng số epoch để model có thời gian hội tụ
+  # Nhiều nghiên cứu cho thấy cần ít nhất 100-200 epochs
+  num_epochs: 150
   learning_rate: 0.0001
   weight_decay: 0.00001
-  # Learning rate scheduler
+  
+  # Learning rate scheduler - ReduceLROnPlateau
+  # Giảm LR khi loss không cải thiện để giúp model escape local minima
   scheduler:
     name: "ReduceLROnPlateau"
-    patience: 5
+    # Số epochs chờ trước khi giảm LR
+    patience: 8
+    # Hệ số giảm LR
     factor: 0.5
+    # LR tối thiểu
     min_lr: 0.000001
-  # Early stopping
-  early_stopping_patience: 15
-  # Gradient clipping
+  
+  # Early stopping - CẢI TIẾN!
+  # Tăng patience để tránh dừng sớm khi model chưa hội tụ
+  # Ví dụ: nếu model đạt best ở epoch 38 và patience=20, 
+  # training sẽ tiếp tục đến epoch 58 trước khi dừng
+  early_stopping_patience: 20
+  # QUAN TRỌNG: Luôn restore best weights khi dừng
+  restore_best_weights: true
+  # Min delta để coi là có improvement
+  early_stopping_min_delta: 0.0001
+  
+  # Gradient clipping - ngăn gradient explosion
   grad_clip: 5.0
   # Number of workers for data loading
   num_workers: 4
-  # Mixed precision training
+  # Mixed precision training - giúp train nhanh hơn trên GPU
   use_amp: true
 
 # Loss function - CẢI TIẾN ĐỂ NGĂN LAZY LEARNING
+# 
+# Vấn đề "lazy learning": Model học cách giảm volume thay vì lọc noise
+# thực sự, vì giảm volume cũng giảm MSE loss.
+#
+# Giải pháp: Kết hợp nhiều loss functions:
+# 1. SI-SDR: Scale-invariant, không bị đánh lừa bởi volume reduction
+# 2. Energy conservation: Phạt nếu output energy quá khác input
+# 3. Multi-resolution STFT: Đảm bảo spectral consistency
 loss:
   # STFT domain losses
   l1_weight: 1.0           # Complex L1 loss weight
@@ -72,17 +109,20 @@ loss:
   
   # Time domain losses - QUAN TRỌNG!
   # SI-SDR loss giúp ngăn model chỉ giảm volume
+  # Scale-Invariant: Không quan tâm âm lượng, chỉ quan tâm chất lượng
   si_sdr_weight: 0.5       # Scale-Invariant SDR loss (chống lazy learning)
   time_l1_weight: 0.3      # Time domain L1 loss
   
-  # Regularization
-  energy_weight: 0.1       # Energy conservation (ngăn giảm volume quá nhiều)
+  # Regularization - QUAN TRỌNG!
+  # Phạt nếu energy ratio (output/target) nằm ngoài [0.6, 1.4]
+  # Điều này ngăn model giảm volume quá nhiều
+  energy_weight: 0.1       # Energy conservation loss
 
 # Checkpoints and logging
 checkpoint:
   save_dir: "./checkpoints"
   save_every: 5  # Save every N epochs
-  keep_last: 3   # Keep last N checkpoints
+  keep_last: 5   # Tăng lên để có nhiều checkpoints hơn để chọn
 
 logging:
   log_dir: "./logs"
@@ -97,3 +137,15 @@ eval:
   # If pesq is not installed, PESQ metrics will be skipped automatically.
   compute_pesq: true
   compute_stoi: true
+  
+# Post-processing - CẢI TIẾN!
+# Các bước xử lý sau khi model predict để đảm bảo output quality
+postprocess:
+  # Match loudness của output với input để tránh volume reduction
+  match_input_loudness: true
+  # Method: 'rms' (khuyến nghị) hoặc 'peak'
+  loudness_method: "rms"
+  # Target peak cho output (tránh clipping)
+  target_peak: 0.95
+  # Denormalize output nếu đã dùng global normalization
+  denormalize: true
