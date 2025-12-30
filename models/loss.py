@@ -1,11 +1,17 @@
 """
 Loss functions for speech denoising
+
+Cải tiến để ngăn "lazy learning" (model chỉ giảm âm lượng thay vì lọc ồn):
+1. SI-SDR Loss: Scale-invariant, không quan tâm âm lượng chỉ quan tâm chất lượng
+2. Time-domain L1 Loss: Đảm bảo waveform được tái tạo chính xác  
+3. Energy Conservation Loss: Phạt nếu model giảm năng lượng quá nhiều
+4. Multi-resolution STFT Loss: Cải tiến với nhiều resolution hơn
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 
 class STFTLoss(nn.Module):
@@ -205,12 +211,156 @@ class PhaseLoss(nn.Module):
 
 class DenoiserLoss(nn.Module):
     """
-    Combined loss function for speech denoising
+    Combined loss function for speech denoising - PHIÊN BẢN CẢI TIẾN
     
-    Combines:
+    Combines (để ngăn lazy learning):
     1. Complex L1 loss on STFT
-    2. Magnitude L1 loss
-    3. Multi-resolution STFT loss (optional, on waveform)
+    2. Magnitude L1 loss  
+    3. Multi-resolution STFT loss (on waveform)
+    4. SI-SDR loss (QUAN TRỌNG! - scale-invariant)
+    5. Time-domain L1 loss
+    6. Energy conservation loss (ngăn giảm volume)
+    
+    Mục đích: Ép model phải thực sự lọc noise, không chỉ giảm âm lượng
+    """
+    
+    def __init__(
+        self,
+        # STFT domain losses
+        complex_weight: float = 1.0,
+        magnitude_weight: float = 1.0,
+        stft_weight: float = 0.5,
+        
+        # Time domain losses (QUAN TRỌNG)
+        si_sdr_weight: float = 0.5,      # SI-SDR loss weight
+        time_l1_weight: float = 0.3,     # Time domain L1
+        
+        # Regularization losses
+        energy_weight: float = 0.1,       # Energy conservation
+        
+        use_mr_stft: bool = True,
+        n_fft: int = 512,
+        hop_length: int = 128,
+        win_length: int = 512
+    ):
+        super().__init__()
+        
+        # Weights
+        self.complex_weight = complex_weight
+        self.magnitude_weight = magnitude_weight
+        self.stft_weight = stft_weight
+        self.si_sdr_weight = si_sdr_weight
+        self.time_l1_weight = time_l1_weight
+        self.energy_weight = energy_weight
+        self.use_mr_stft = use_mr_stft
+        
+        # STFT domain losses
+        self.complex_loss = ComplexL1Loss()
+        self.magnitude_loss = MagnitudeLoss('l1')
+        
+        if use_mr_stft:
+            # Cải tiến: Thêm nhiều resolution hơn
+            self.mr_stft_loss = MultiResolutionSTFTLoss(
+                fft_sizes=[256, 512, 1024, 2048],
+                hop_sizes=[64, 128, 256, 512],
+                win_sizes=[256, 512, 1024, 2048]
+            )
+        
+        # Time domain losses (QUAN TRỌNG cho anti-lazy-learning)
+        self.sdr_loss = SDRLoss(clip_value=30.0)
+        self.time_l1_loss = TimeDomainL1Loss()
+        self.energy_loss = EnergyConservationLoss(min_ratio=0.6, max_ratio=1.4)
+        
+        # STFT parameters
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.win_length = win_length
+        self.register_buffer('window', torch.hann_window(win_length))
+    
+    def _istft(self, stft: torch.Tensor) -> torch.Tensor:
+        """Convert STFT to waveform"""
+        stft_complex = torch.complex(stft[:, 0], stft[:, 1])
+        
+        waveform = torch.istft(
+            stft_complex,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            win_length=self.win_length,
+            window=self.window,
+            center=True,
+            return_complex=False
+        )
+        
+        return waveform
+    
+    def forward(
+        self,
+        pred_stft: torch.Tensor,
+        target_stft: torch.Tensor,
+        pred_waveform: Optional[torch.Tensor] = None,
+        target_waveform: Optional[torch.Tensor] = None,
+        noisy_waveform: Optional[torch.Tensor] = None  # Thêm để tính noise awareness
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            pred_stft: Predicted STFT [batch, 2, freq, time]
+            target_stft: Target STFT [batch, 2, freq, time]
+            pred_waveform: Predicted waveform (optional)
+            target_waveform: Target/clean waveform (optional)
+            noisy_waveform: Original noisy waveform (optional)
+        
+        Returns:
+            Dictionary with loss components and total loss
+        """
+        losses = {}
+        
+        # ===== STFT Domain Losses =====
+        # Complex L1 loss
+        complex_l = self.complex_loss(pred_stft, target_stft)
+        losses['complex_loss'] = complex_l
+        
+        # Magnitude loss
+        mag_l = self.magnitude_loss(pred_stft, target_stft)
+        losses['magnitude_loss'] = mag_l
+        
+        # Total starts with STFT domain losses
+        total = self.complex_weight * complex_l + self.magnitude_weight * mag_l
+        
+        # ===== Time Domain Losses (QUAN TRỌNG!) =====
+        if pred_waveform is not None and target_waveform is not None:
+            # Multi-resolution STFT loss
+            if self.use_mr_stft:
+                mr_stft_l = self.mr_stft_loss(pred_waveform, target_waveform)
+                losses['mr_stft_loss'] = mr_stft_l
+                total += self.stft_weight * mr_stft_l
+            
+            # SI-SDR loss - ĐÂY LÀ KEY ĐỂ NGĂN LAZY LEARNING!
+            if self.si_sdr_weight > 0:
+                sdr_l = self.sdr_loss(pred_waveform, target_waveform)
+                losses['si_sdr_loss'] = sdr_l
+                total += self.si_sdr_weight * sdr_l
+            
+            # Time domain L1 loss
+            if self.time_l1_weight > 0:
+                time_l1 = self.time_l1_loss(pred_waveform, target_waveform)
+                losses['time_l1_loss'] = time_l1
+                total += self.time_l1_weight * time_l1
+            
+            # Energy conservation loss - Ngăn model giảm volume quá nhiều
+            if self.energy_weight > 0:
+                energy_l = self.energy_loss(pred_waveform, target_waveform)
+                losses['energy_loss'] = energy_l
+                total += self.energy_weight * energy_l
+        
+        losses['total_loss'] = total
+        
+        return losses
+
+
+class DenoiserLossLegacy(nn.Module):
+    """
+    Legacy loss function (giữ lại để backward compatibility)
+    Dùng DenoiserLoss mới thay thế để có kết quả tốt hơn
     """
     
     def __init__(
@@ -236,28 +386,10 @@ class DenoiserLoss(nn.Module):
         if use_mr_stft:
             self.mr_stft_loss = MultiResolutionSTFTLoss()
         
-        # STFT parameters for waveform reconstruction
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
         self.register_buffer('window', torch.hann_window(win_length))
-    
-    def _istft(self, stft: torch.Tensor) -> torch.Tensor:
-        """Convert STFT to waveform"""
-        # stft: [batch, 2, freq, time]
-        stft_complex = torch.complex(stft[:, 0], stft[:, 1])
-        
-        waveform = torch.istft(
-            stft_complex,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            win_length=self.win_length,
-            window=self.window,
-            center=True,
-            return_complex=False
-        )
-        
-        return waveform
     
     def forward(
         self,
@@ -266,30 +398,16 @@ class DenoiserLoss(nn.Module):
         pred_waveform: Optional[torch.Tensor] = None,
         target_waveform: Optional[torch.Tensor] = None
     ) -> dict:
-        """
-        Args:
-            pred_stft: Predicted STFT [batch, 2, freq, time]
-            target_stft: Target STFT [batch, 2, freq, time]
-            pred_waveform: Predicted waveform (optional)
-            target_waveform: Target waveform (optional)
-        
-        Returns:
-            Dictionary with loss components and total loss
-        """
         losses = {}
         
-        # Complex L1 loss
         complex_l = self.complex_loss(pred_stft, target_stft)
         losses['complex_loss'] = complex_l
         
-        # Magnitude loss
         mag_l = self.magnitude_loss(pred_stft, target_stft)
         losses['magnitude_loss'] = mag_l
         
-        # Total loss
         total = self.complex_weight * complex_l + self.magnitude_weight * mag_l
         
-        # Multi-resolution STFT loss on waveform
         if self.use_mr_stft and (pred_waveform is not None and target_waveform is not None):
             mr_stft_l = self.mr_stft_loss(pred_waveform, target_waveform)
             losses['mr_stft_loss'] = mr_stft_l
@@ -304,7 +422,15 @@ class SDRLoss(nn.Module):
     """
     Scale-Invariant Signal-to-Distortion Ratio loss
     Commonly used in source separation tasks
+    
+    ĐÂY LÀ LOSS QUAN TRỌNG NHẤT để ngăn "lazy learning"!
+    - Scale-invariant: Không quan tâm âm lượng, chỉ quan tâm chất lượng
+    - Nếu model chỉ giảm volume, SI-SDR sẽ không cải thiện
     """
+    
+    def __init__(self, clip_value: float = 30.0):
+        super().__init__()
+        self.clip_value = clip_value  # Clip để tránh gradient explosion
     
     def forward(
         self,
@@ -313,25 +439,133 @@ class SDRLoss(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            pred: Predicted waveform [batch, samples]
-            target: Target waveform [batch, samples]
+            pred: Predicted waveform [batch, samples] or [batch, 1, samples]
+            target: Target waveform [batch, samples] or [batch, 1, samples]
         
         Returns:
             Negative SI-SDR (to minimize)
         """
-        # Zero mean
+        # Flatten if needed
+        if pred.dim() == 3:
+            pred = pred.squeeze(1)
+        if target.dim() == 3:
+            target = target.squeeze(1)
+            
+        # Zero mean (remove DC offset)
         pred = pred - pred.mean(dim=-1, keepdim=True)
         target = target - target.mean(dim=-1, keepdim=True)
         
-        # SI-SDR
+        # SI-SDR calculation
+        # s_target = <pred, target> * target / ||target||^2
         dot = torch.sum(pred * target, dim=-1, keepdim=True)
         s_target_energy = torch.sum(target ** 2, dim=-1, keepdim=True) + 1e-8
         proj = dot * target / s_target_energy
         
+        # e_noise = pred - s_target
         noise = pred - proj
         
+        # SI-SDR = 10 * log10(||s_target||^2 / ||e_noise||^2)
         si_sdr = 10 * torch.log10(
             torch.sum(proj ** 2, dim=-1) / (torch.sum(noise ** 2, dim=-1) + 1e-8) + 1e-8
         )
         
+        # Clip to prevent gradient explosion
+        si_sdr = torch.clamp(si_sdr, -self.clip_value, self.clip_value)
+        
         return -si_sdr.mean()  # Negative because we want to maximize SI-SDR
+
+
+class TimeDomainL1Loss(nn.Module):
+    """
+    L1 loss trên waveform domain
+    Giúp đảm bảo waveform được tái tạo chính xác
+    """
+    
+    def forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor
+    ) -> torch.Tensor:
+        if pred.dim() == 3:
+            pred = pred.squeeze(1)
+        if target.dim() == 3:
+            target = target.squeeze(1)
+        return F.l1_loss(pred, target)
+
+
+class EnergyConservationLoss(nn.Module):
+    """
+    Loss để ngăn model giảm năng lượng/amplitude quá nhiều
+    
+    Ý tưởng: Năng lượng của output không được nhỏ hơn quá nhiều so với 
+    năng lượng của clean signal
+    """
+    
+    def __init__(self, min_ratio: float = 0.7, max_ratio: float = 1.3):
+        super().__init__()
+        self.min_ratio = min_ratio
+        self.max_ratio = max_ratio
+    
+    def forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Phạt nếu tỷ lệ năng lượng pred/target nằm ngoài [min_ratio, max_ratio]
+        """
+        if pred.dim() == 3:
+            pred = pred.squeeze(1)
+        if target.dim() == 3:
+            target = target.squeeze(1)
+            
+        pred_energy = torch.sum(pred ** 2, dim=-1)
+        target_energy = torch.sum(target ** 2, dim=-1) + 1e-8
+        
+        ratio = pred_energy / target_energy
+        
+        # Phạt nếu ratio < min_ratio (output quá nhỏ)
+        low_penalty = F.relu(self.min_ratio - ratio)
+        
+        # Phạt nếu ratio > max_ratio (output quá lớn)  
+        high_penalty = F.relu(ratio - self.max_ratio)
+        
+        return (low_penalty + high_penalty).mean()
+
+
+class NoiseAwarenessLoss(nn.Module):
+    """
+    Loss để kiểm tra model có thực sự loại bỏ noise hay không
+    
+    Ý tưởng: So sánh residual (pred - clean) với noise gốc (noisy - clean)
+    Residual nên nhỏ hơn noise gốc
+    """
+    
+    def forward(
+        self,
+        pred: torch.Tensor,
+        clean: torch.Tensor,
+        noisy: torch.Tensor
+    ) -> torch.Tensor:
+        if pred.dim() == 3:
+            pred = pred.squeeze(1)
+        if clean.dim() == 3:
+            clean = clean.squeeze(1)
+        if noisy.dim() == 3:
+            noisy = noisy.squeeze(1)
+            
+        # Residual noise trong prediction
+        pred_residual = pred - clean
+        
+        # Noise gốc
+        original_noise = noisy - clean
+        
+        # Năng lượng của residual so với noise gốc
+        pred_residual_energy = torch.sum(pred_residual ** 2, dim=-1) + 1e-8
+        original_noise_energy = torch.sum(original_noise ** 2, dim=-1) + 1e-8
+        
+        # Tỷ lệ noise reduction (càng nhỏ càng tốt)
+        noise_ratio = pred_residual_energy / original_noise_energy
+        
+        # Phạt nếu không giảm được noise
+        return F.relu(noise_ratio - 0.5).mean()  # Yêu cầu giảm ít nhất 50% noise

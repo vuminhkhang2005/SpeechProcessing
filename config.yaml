@@ -63,11 +63,20 @@ training:
   # Mixed precision training
   use_amp: true
 
-# Loss function
+# Loss function - CẢI TIẾN ĐỂ NGĂN LAZY LEARNING
 loss:
-  # Combination of L1 and Multi-resolution STFT loss
-  l1_weight: 1.0
-  stft_weight: 1.0
+  # STFT domain losses
+  l1_weight: 1.0           # Complex L1 loss weight
+  magnitude_weight: 1.0    # Magnitude loss weight
+  stft_weight: 0.5         # Multi-resolution STFT loss weight
+  
+  # Time domain losses - QUAN TRỌNG!
+  # SI-SDR loss giúp ngăn model chỉ giảm volume
+  si_sdr_weight: 0.5       # Scale-Invariant SDR loss (chống lazy learning)
+  time_l1_weight: 0.3      # Time domain L1 loss
+  
+  # Regularization
+  energy_weight: 0.1       # Energy conservation (ngăn giảm volume quá nhiều)
 
 # Checkpoints and logging
 checkpoint:
