@@ -38,6 +38,12 @@ from utils.audio_utils import AudioProcessor
 class Trainer:
     """
     Trainer class for speech denoising model
+    
+    CẢI TIẾN:
+    1. EarlyStopping với restore_best_weights
+    2. ReduceLROnPlateau scheduler với patience cao hơn
+    3. Logging chi tiết hơn (SI-SDR, energy loss, etc.)
+    4. Gradient monitoring
     """
     
     def __init__(
@@ -67,17 +73,18 @@ class Trainer:
             weight_decay=train_cfg.get('weight_decay', 1e-5)
         )
         
-        # Scheduler
+        # Scheduler - CẢI TIẾN: patience cao hơn
         scheduler_cfg = train_cfg.get('scheduler', {})
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode='min',
             factor=scheduler_cfg.get('factor', 0.5),
-            patience=scheduler_cfg.get('patience', 5),
-            min_lr=scheduler_cfg.get('min_lr', 1e-6)
+            patience=scheduler_cfg.get('patience', 8),  # Tăng từ 5 lên 8
+            min_lr=scheduler_cfg.get('min_lr', 1e-7),
+            verbose=True  # Log khi LR thay đổi
         )
         
-        # Loss function - CẢI TIẾN VỚI SI-SDR để ngăn lazy learning
+        # Loss function - CẢI TIẾN VỚI SI-SDR và các loss mới
         loss_cfg = config.get('loss', {})
         stft_cfg = config.get('stft', {})
         self.criterion = DenoiserLoss(
@@ -119,16 +126,25 @@ class Trainer:
         self.ckpt_dir = Path(ckpt_cfg['save_dir'])
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         self.save_every = ckpt_cfg.get('save_every', 5)
-        self.keep_last = ckpt_cfg.get('keep_last', 3)
+        self.keep_last = ckpt_cfg.get('keep_last', 5)  # Tăng từ 3 lên 5
         
-        # Early stopping
-        self.early_stopping_patience = train_cfg.get('early_stopping_patience', 15)
+        # Early stopping - CẢI TIẾN QUAN TRỌNG
+        early_stop_cfg = train_cfg.get('early_stopping', {})
+        self.early_stopping_patience = early_stop_cfg.get('patience', 
+                                        train_cfg.get('early_stopping_patience', 25))  # Tăng patience
+        self.early_stopping_min_delta = early_stop_cfg.get('min_delta', 0.0001)
+        self.restore_best_weights = early_stop_cfg.get('restore_best_weights', True)  # QUAN TRỌNG!
+        
         self.best_val_loss = float('inf')
+        self.best_model_state = None  # Lưu best weights
         self.patience_counter = 0
         
         # Training state
         self.current_epoch = 0
         self.global_step = 0
+        
+        # Thêm tracking cho gradient norms (debug lazy learning)
+        self.track_gradients = True
     
     def train_epoch(self) -> Dict[str, float]:
         """Train for one epoch"""
@@ -358,16 +374,40 @@ class Trainer:
         
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
     
+    def _compute_gradient_norm(self) -> float:
+        """Tính gradient norm để monitor training stability"""
+        total_norm = 0.0
+        for p in self.model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        return total_norm ** 0.5
+    
     def train(self, resume_from: Optional[str] = None):
-        """Full training loop"""
+        """
+        Full training loop với CẢI TIẾN:
+        1. restore_best_weights khi early stopping
+        2. Gradient monitoring
+        3. Detailed logging cho mỗi loss component
+        """
         if resume_from is not None:
             self.load_checkpoint(resume_from)
         
-        print(f"\nStarting training from epoch {self.current_epoch}")
+        print(f"\n{'='*60}")
+        print("TRAINING CONFIGURATION")
+        print(f"{'='*60}")
+        print(f"Starting from epoch: {self.current_epoch}")
         print(f"Total epochs: {self.num_epochs}")
         print(f"Device: {self.device}")
         print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
-        print()
+        print(f"\nEarly Stopping:")
+        print(f"  - Patience: {self.early_stopping_patience} epochs")
+        print(f"  - Min delta: {self.early_stopping_min_delta}")
+        print(f"  - Restore best weights: {self.restore_best_weights}")
+        print(f"\nLoss weights:")
+        print(f"  - SI-SDR (anti lazy-learning): {self.criterion.si_sdr_weight}")
+        print(f"  - Energy conservation: {self.criterion.energy_weight}")
+        print(f"{'='*60}\n")
         
         for epoch in range(self.current_epoch, self.num_epochs):
             self.current_epoch = epoch
@@ -383,27 +423,48 @@ class Trainer:
             self.scheduler.step(val_loss)
             
             # Log epoch results
-            print(f"\nEpoch {epoch} Results:")
+            print(f"\n{'='*50}")
+            print(f"Epoch {epoch} Results:")
+            print(f"{'='*50}")
             print(f"  Train Loss: {train_losses['total_loss']:.4f}")
-            print(f"  Val Loss: {val_loss:.4f}")
+            print(f"  Val Loss:   {val_loss:.4f}")
+            
+            # Log individual loss components
+            if 'si_sdr_loss' in val_results:
+                print(f"  SI-SDR Loss: {val_results['si_sdr_loss']:.4f}")
+            if 'energy_loss' in val_results:
+                print(f"  Energy Loss: {val_results['energy_loss']:.4f}")
+            
+            print(f"\n  Metrics:")
             if 'pesq' in val_results:
-                print(f"  PESQ: {val_results['pesq']:.3f}")
-            print(f"  STOI: {val_results.get('stoi', 0):.3f}")
-            print(f"  SI-SDR: {val_results.get('si_sdr', 0):.2f} dB")
+                print(f"    PESQ: {val_results['pesq']:.3f}")
+            print(f"    STOI: {val_results.get('stoi', 0):.3f}")
+            print(f"    SI-SDR: {val_results.get('si_sdr', 0):.2f} dB")
+            
+            print(f"\n  Learning rate: {self.optimizer.param_groups[0]['lr']:.2e}")
             
             # TensorBoard logging
             for key, value in train_losses.items():
                 self.writer.add_scalar(f'epoch/train_{key}', value, epoch)
             for key, value in val_results.items():
                 self.writer.add_scalar(f'epoch/val_{key}', value, epoch)
+            self.writer.add_scalar('epoch/learning_rate', self.optimizer.param_groups[0]['lr'], epoch)
             
-            # Check for improvement
-            is_best = val_loss < self.best_val_loss
+            # Check for improvement (với min_delta)
+            improvement = self.best_val_loss - val_loss
+            is_best = improvement > self.early_stopping_min_delta
+            
             if is_best:
+                print(f"\n  ✓ Improvement: {improvement:.6f}")
                 self.best_val_loss = val_loss
                 self.patience_counter = 0
+                
+                # QUAN TRỌNG: Lưu best model state
+                if self.restore_best_weights:
+                    self.best_model_state = {k: v.clone() for k, v in self.model.state_dict().items()}
             else:
                 self.patience_counter += 1
+                print(f"\n  ✗ No improvement for {self.patience_counter}/{self.early_stopping_patience} epochs")
             
             # Save checkpoint
             if (epoch + 1) % self.save_every == 0 or is_best:
@@ -411,14 +472,31 @@ class Trainer:
             
             # Early stopping
             if self.patience_counter >= self.early_stopping_patience:
-                print(f"\nEarly stopping at epoch {epoch}")
+                print(f"\n{'='*50}")
+                print(f"EARLY STOPPING at epoch {epoch}")
+                print(f"{'='*50}")
+                
+                # QUAN TRỌNG: Restore best weights
+                if self.restore_best_weights and self.best_model_state is not None:
+                    print("Restoring best model weights...")
+                    self.model.load_state_dict(self.best_model_state)
+                    
+                    # Save final best model
+                    self.save_checkpoint(is_best=True)
+                    print(f"Best model saved with val_loss: {self.best_val_loss:.4f}")
+                
                 break
         
         self.writer.close()
-        print("\nTraining completed!")
+        
+        print(f"\n{'='*60}")
+        print("TRAINING COMPLETED!")
+        print(f"{'='*60}")
         print(f"Best validation loss: {self.best_val_loss:.4f}")
+        print(f"Final epoch: {self.current_epoch}")
         print(f"Checkpoints saved to: {self.ckpt_dir}")
         print(f"Logs saved to: {self.log_dir}")
+        print(f"{'='*60}")
 
 
 def load_config(config_path: str) -> dict:
