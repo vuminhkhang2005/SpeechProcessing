@@ -10,7 +10,8 @@ Kiến trúc U-Net được sử dụng rộng rãi trong speech enhancement vì
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional
+from typing import List, Optional, Dict
+import re
 
 
 class ConvBlock(nn.Module):
@@ -394,6 +395,176 @@ class UNetDenoiserLite(nn.Module):
             mask = F.interpolate(mask, size=input_stft.shape[2:], mode='bilinear', align_corners=True)
         
         return input_stft * mask
+
+
+def convert_old_checkpoint(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """
+    Convert old checkpoint format to new format.
+    
+    Changes:
+    - .conv -> .block (in ConvBlock)
+    - Handle different encoder channel configurations
+    
+    Args:
+        state_dict: Old state dict
+    
+    Returns:
+        Converted state dict compatible with new model
+    """
+    new_state_dict = {}
+    
+    for key, value in state_dict.items():
+        new_key = key
+        
+        # Convert .conv to .block in ConvBlock
+        # Pattern: xxx.conv1.conv.0.weight -> xxx.conv1.block.0.weight
+        # Pattern: xxx.conv2.conv.0.weight -> xxx.conv2.block.0.weight
+        new_key = re.sub(r'\.conv(\d?)\.conv\.', r'.conv\1.block.', new_key)
+        
+        # Convert init_conv pattern if needed
+        # init_conv.conv.0.weight -> init_conv.block.0.weight (if old format)
+        if new_key.startswith('init_conv.conv.'):
+            new_key = new_key.replace('init_conv.conv.', 'init_conv.block.')
+        
+        # Convert output_conv patterns if needed
+        new_key = new_key.replace('.output_conv.conv.', '.output_conv.')
+        
+        new_state_dict[new_key] = value
+    
+    return new_state_dict
+
+
+def detect_encoder_channels_from_checkpoint(state_dict: Dict[str, torch.Tensor]) -> List[int]:
+    """
+    Detect encoder channel configuration from checkpoint.
+    
+    Args:
+        state_dict: Checkpoint state dict
+    
+    Returns:
+        List of encoder channels
+    """
+    encoder_indices = set()
+    encoder_channels = {}
+    
+    for key in state_dict.keys():
+        # Look for encoder patterns
+        match = re.match(r'encoders\.(\d+)\.conv1\.(conv|block)\.0\.weight', key)
+        if match:
+            idx = int(match.group(1))
+            encoder_indices.add(idx)
+            # Get output channels from first conv weight shape
+            encoder_channels[idx] = state_dict[key].shape[0]
+    
+    if not encoder_indices:
+        # Fallback to default
+        return [32, 64, 128, 256, 512]
+    
+    # Build channel list: [input_ch, enc0_out, enc1_out, ...]
+    max_idx = max(encoder_indices)
+    
+    # Get init_conv output channels (first encoder input)
+    init_conv_key = None
+    for key in state_dict.keys():
+        if 'init_conv' in key and 'weight' in key and '.0.' in key:
+            init_conv_key = key
+            break
+    
+    if init_conv_key:
+        first_channel = state_dict[init_conv_key].shape[0]
+    else:
+        first_channel = 32
+    
+    channels = [first_channel]
+    for i in range(max_idx + 1):
+        if i in encoder_channels:
+            channels.append(encoder_channels[i])
+        else:
+            # Estimate based on pattern (double channels each layer)
+            channels.append(channels[-1] * 2)
+    
+    return channels
+
+
+def load_model_checkpoint(
+    checkpoint_path: str,
+    device: torch.device = None,
+    strict: bool = False
+) -> tuple:
+    """
+    Load model from checkpoint with automatic format conversion.
+    
+    Args:
+        checkpoint_path: Path to checkpoint file
+        device: Device to load model on
+        strict: Whether to strictly enforce state_dict matching
+    
+    Returns:
+        Tuple of (model, config_dict)
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    
+    # Get state dict
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    elif 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+    else:
+        state_dict = checkpoint
+    
+    # Get config from checkpoint if available
+    config = checkpoint.get('config', {})
+    model_cfg = config.get('model', {})
+    
+    # Try to detect encoder channels from checkpoint
+    detected_channels = detect_encoder_channels_from_checkpoint(state_dict)
+    encoder_channels = model_cfg.get('encoder_channels', detected_channels)
+    
+    # Convert old checkpoint format if needed
+    converted_state_dict = convert_old_checkpoint(state_dict)
+    
+    # Create model with detected configuration
+    model = UNetDenoiser(
+        in_channels=model_cfg.get('in_channels', 2),
+        out_channels=model_cfg.get('out_channels', 2),
+        encoder_channels=encoder_channels,
+        use_attention=model_cfg.get('use_attention', True),
+        dropout=0.0,  # No dropout during inference
+        mask_type=model_cfg.get('mask_type', 'CRM')
+    )
+    
+    # Try loading with converted state dict first
+    try:
+        model.load_state_dict(converted_state_dict, strict=strict)
+        print(f"Successfully loaded checkpoint with {'strict' if strict else 'non-strict'} mode")
+    except RuntimeError as e:
+        if not strict:
+            # Try partial load - load matching keys only
+            model_dict = model.state_dict()
+            pretrained_dict = {k: v for k, v in converted_state_dict.items() 
+                             if k in model_dict and v.shape == model_dict[k].shape}
+            
+            missing_keys = set(model_dict.keys()) - set(pretrained_dict.keys())
+            unexpected_keys = set(converted_state_dict.keys()) - set(model_dict.keys())
+            
+            if pretrained_dict:
+                model_dict.update(pretrained_dict)
+                model.load_state_dict(model_dict)
+                print(f"Partial load: {len(pretrained_dict)}/{len(model_dict)} keys loaded")
+                if missing_keys:
+                    print(f"Missing keys: {len(missing_keys)}")
+                if unexpected_keys:
+                    print(f"Unexpected keys: {len(unexpected_keys)}")
+            else:
+                raise RuntimeError(f"Could not load any weights from checkpoint: {e}")
+        else:
+            raise
+    
+    model = model.to(device)
+    return model, config
 
 
 if __name__ == '__main__':
