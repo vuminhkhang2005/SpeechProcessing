@@ -10,10 +10,10 @@ data:
   # Google Drive settings (only used if use_gdrive: true)
   gdrive:
     # Path to dataset folder in Google Drive
-    # Example: /content/drive/MyDrive/datasets
-    path: "/content/drive/MyDrive/datasets"
-    # Or use folder ID from the Drive URL (alternative)
-    # folder_id: "1mDHfxtzvC-7kw0YXF0dFAcYlh7GAb2-"
+    # Thư mục chứa: clean_trainset_28spk_wav, noisy_trainset_28spk_wav, etc.
+    path: "/content/drive/MyDrive/speech_denoising_data"
+    # Folder ID from the Drive URL (backup option)
+    folder_id: "1mDHfxtzvC-7kw0YXF0dFAcYlh7GAb2-"
   
   # Local paths (used if use_gdrive: false)
   # Đường dẫn tới thư mục chứa VoiceBank + DEMAND dataset
@@ -63,11 +63,20 @@ training:
   # Mixed precision training
   use_amp: true
 
-# Loss function
+# Loss function - CẢI TIẾN ĐỂ NGĂN LAZY LEARNING
 loss:
-  # Combination of L1 and Multi-resolution STFT loss
-  l1_weight: 1.0
-  stft_weight: 1.0
+  # STFT domain losses
+  l1_weight: 1.0           # Complex L1 loss weight
+  magnitude_weight: 1.0    # Magnitude loss weight
+  stft_weight: 0.5         # Multi-resolution STFT loss weight
+  
+  # Time domain losses - QUAN TRỌNG!
+  # SI-SDR loss giúp ngăn model chỉ giảm volume
+  si_sdr_weight: 0.5       # Scale-Invariant SDR loss (chống lazy learning)
+  time_l1_weight: 0.3      # Time domain L1 loss
+  
+  # Regularization
+  energy_weight: 0.1       # Energy conservation (ngăn giảm volume quá nhiều)
 
 # Checkpoints and logging
 checkpoint:

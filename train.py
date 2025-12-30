@@ -77,13 +77,20 @@ class Trainer:
             min_lr=scheduler_cfg.get('min_lr', 1e-6)
         )
         
-        # Loss function
+        # Loss function - CẢI TIẾN VỚI SI-SDR để ngăn lazy learning
         loss_cfg = config.get('loss', {})
         stft_cfg = config.get('stft', {})
         self.criterion = DenoiserLoss(
+            # STFT domain losses
             complex_weight=loss_cfg.get('l1_weight', 1.0),
-            magnitude_weight=1.0,
+            magnitude_weight=loss_cfg.get('magnitude_weight', 1.0),
             stft_weight=loss_cfg.get('stft_weight', 0.5),
+            # Time domain losses - QUAN TRỌNG để ngăn lazy learning!
+            si_sdr_weight=loss_cfg.get('si_sdr_weight', 0.5),
+            time_l1_weight=loss_cfg.get('time_l1_weight', 0.3),
+            # Regularization - ngăn giảm volume quá nhiều
+            energy_weight=loss_cfg.get('energy_weight', 0.1),
+            # STFT params
             use_mr_stft=True,
             n_fft=stft_cfg.get('n_fft', 512),
             hop_length=stft_cfg.get('hop_length', 128),
@@ -126,7 +133,15 @@ class Trainer:
     def train_epoch(self) -> Dict[str, float]:
         """Train for one epoch"""
         self.model.train()
-        epoch_losses = {'total_loss': 0.0, 'complex_loss': 0.0, 'magnitude_loss': 0.0}
+        # Thêm tracking cho các loss mới (SI-SDR, energy, time_l1)
+        epoch_losses = {
+            'total_loss': 0.0, 
+            'complex_loss': 0.0, 
+            'magnitude_loss': 0.0,
+            'si_sdr_loss': 0.0,
+            'time_l1_loss': 0.0,
+            'energy_loss': 0.0
+        }
         num_batches = 0
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch}")
@@ -222,7 +237,15 @@ class Trainer:
     def validate(self) -> Dict[str, float]:
         """Validate on validation set"""
         self.model.eval()
-        val_losses = {'total_loss': 0.0, 'complex_loss': 0.0, 'magnitude_loss': 0.0}
+        # Tracking cho các loss mới
+        val_losses = {
+            'total_loss': 0.0, 
+            'complex_loss': 0.0, 
+            'magnitude_loss': 0.0,
+            'si_sdr_loss': 0.0,
+            'time_l1_loss': 0.0,
+            'energy_loss': 0.0
+        }
         metrics = {'stoi': 0.0, 'si_sdr': 0.0}
         num_batches = 0
         
@@ -254,8 +277,11 @@ class Trainer:
             pred_wav = pred_wav[..., :min_len]
             clean_wav_trimmed = clean_wav[..., :min_len]
             
-            # Calculate losses
-            losses = self.criterion(pred_stft, clean_stft)
+            # Calculate losses - bao gồm time domain losses
+            losses = self.criterion(
+                pred_stft, clean_stft,
+                pred_wav, clean_wav_trimmed
+            )
             
             for key in val_losses:
                 if key in losses:
