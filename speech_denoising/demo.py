@@ -111,7 +111,7 @@ def demo_model(checkpoint_path: str = None):
     # Load checkpoint nếu có
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"   Loading checkpoint: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         print(f"   Loaded from epoch {checkpoint['epoch']}")
     else:

@@ -78,7 +78,7 @@ class SpeechDenoiser:
     
     def _load_model(self, checkpoint_path: str) -> torch.nn.Module:
         """Load model from checkpoint"""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         # Get config from checkpoint if available
         config = checkpoint.get('config', {})
