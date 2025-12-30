@@ -1,19 +1,9 @@
 """
-Data module for speech denoising dataset handling
+Dataset utilities package.
+
+This project expects `data.dataset` to provide:
+- VoiceBankDEMANDDataset
+- create_dataloaders
+- setup_gdrive_dataset (Colab/Drive convenience)
 """
 
-from .dataset import (
-    VoiceBankDEMANDDataset,
-    create_dataloaders,
-    setup_gdrive_dataset,
-    mount_google_drive,
-    is_colab
-)
-
-__all__ = [
-    'VoiceBankDEMANDDataset',
-    'create_dataloaders',
-    'setup_gdrive_dataset',
-    'mount_google_drive',
-    'is_colab'
-]

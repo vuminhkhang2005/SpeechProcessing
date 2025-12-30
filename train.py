@@ -123,6 +123,7 @@ class Trainer:
         
         # Early stopping
         self.early_stopping_patience = train_cfg.get('early_stopping_patience', 15)
+        self.restore_best_weights = train_cfg.get('restore_best_weights', True)
         self.best_val_loss = float('inf')
         self.patience_counter = 0
         
@@ -412,8 +413,22 @@ class Trainer:
             # Early stopping
             if self.patience_counter >= self.early_stopping_patience:
                 print(f"\nEarly stopping at epoch {epoch}")
+                if self.restore_best_weights:
+                    best_path = self.ckpt_dir / 'best_model.pt'
+                    if best_path.exists():
+                        best_ckpt = torch.load(best_path, map_location=self.device, weights_only=False)
+                        self.model.load_state_dict(best_ckpt['model_state_dict'])
+                        print("  Restored best_model weights before exit.")
                 break
         
+        # If we finished without early stopping but want best weights, restore them too
+        if self.restore_best_weights:
+            best_path = self.ckpt_dir / 'best_model.pt'
+            if best_path.exists():
+                best_ckpt = torch.load(best_path, map_location=self.device, weights_only=False)
+                self.model.load_state_dict(best_ckpt['model_state_dict'])
+                print("Restored best_model weights at end of training.")
+
         self.writer.close()
         print("\nTraining completed!")
         print(f"Best validation loss: {self.best_val_loss:.4f}")

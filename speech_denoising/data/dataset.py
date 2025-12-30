@@ -1,293 +1,199 @@
 """
-Dataset classes and utilities for VoiceBank + DEMAND speech denoising dataset
+Dataset utilities for VoiceBank + DEMAND speech denoising.
 
-This module provides:
-- VoiceBankDEMANDDataset: PyTorch Dataset for loading audio pairs
-- create_dataloaders: Factory function for creating train/val dataloaders
-- Google Colab/Drive integration utilities
+The training / evaluation scripts in this repo import:
+    from data.dataset import VoiceBankDEMANDDataset, create_dataloaders, setup_gdrive_dataset
+
+Implementation notes
+--------------------
+- Uses `librosa` (not torchaudio) for maximum compatibility (e.g. Colab).
+- Returns both waveform pairs (clean/noisy) and their complex STFTs
+  as real tensors with last-dim size 2: [..., 2] = (real, imag).
+- For training/validation, `segment_length` should be an int so DataLoader
+  can collate fixed-size tensors. For test/eval you may pass `segment_length=None`
+  to keep full utterances (variable length).
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import random
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple
 
+import librosa
 import torch
-import torch.nn.functional as F
-import torchaudio
 from torch.utils.data import Dataset, DataLoader
-import numpy as np
+
+from utils.audio_utils import AudioProcessor
 
 
-def is_colab() -> bool:
-    """
-    Check if running in Google Colab environment
-    
-    Returns:
-        True if running in Colab, False otherwise
-    """
-    try:
-        import google.colab
-        return True
-    except ImportError:
-        return False
-
-
-def mount_google_drive(mount_path: str = '/content/drive') -> bool:
-    """
-    Mount Google Drive in Colab
-    
-    Args:
-        mount_path: Path where Drive will be mounted
-    
-    Returns:
-        True if successfully mounted, False otherwise
-    """
-    if not is_colab():
-        print("Not running in Google Colab. Google Drive mount not available.")
-        return False
-    
-    try:
-        from google.colab import drive
-        drive.mount(mount_path)
-        print(f"✅ Google Drive mounted at {mount_path}")
-        return True
-    except Exception as e:
-        print(f"❌ Failed to mount Google Drive: {e}")
-        return False
+@dataclass(frozen=True)
+class DatasetPaths:
+    train_clean_dir: str
+    train_noisy_dir: str
+    test_clean_dir: str
+    test_noisy_dir: str
 
 
 def setup_gdrive_dataset(
     gdrive_path: Optional[str] = None,
     gdrive_folder_id: Optional[str] = None,
-    mount_path: str = '/content/drive'
 ) -> Optional[Dict[str, str]]:
     """
-    Setup dataset paths from Google Drive
-    
+    Convenience helper for Google Colab users who mounted Google Drive.
+
+    This function does NOT download anything. It only validates and returns
+    directory paths under `gdrive_path`.
+
     Args:
-        gdrive_path: Path to dataset folder in Google Drive 
-                     (e.g., '/content/drive/MyDrive/datasets')
-        gdrive_folder_id: Google Drive folder ID (alternative to path)
-        mount_path: Where to mount Google Drive
-    
-    Returns:
-        Dictionary with dataset paths, or None if setup failed
-    
-    Example:
-        >>> paths = setup_gdrive_dataset(gdrive_path='/content/drive/MyDrive/datasets')
-        >>> train_loader, val_loader = create_dataloaders(**paths)
+        gdrive_path: Path to the folder that contains the 4 dataset directories.
+        gdrive_folder_id: Accepted for compatibility with older notebooks/configs.
+            (Not used here; downloading by folder_id is intentionally not implemented.)
     """
-    # Mount Google Drive if in Colab
-    if is_colab():
-        if not os.path.exists(mount_path):
-            if not mount_google_drive(mount_path):
-                return None
-    
-    # Determine dataset base path
-    if gdrive_path:
-        base_path = Path(gdrive_path)
-    elif gdrive_folder_id:
-        # For folder ID, user needs to have already mounted and shared the folder
-        base_path = Path(mount_path) / 'MyDrive' / 'datasets'
-        print(f"Using default path: {base_path}")
-    else:
-        # Default path
-        base_path = Path(mount_path) / 'MyDrive' / 'datasets'
-        print(f"Using default path: {base_path}")
-    
-    # Expected subdirectories
-    expected_dirs = {
-        'train_clean_dir': 'clean_trainset_28spk_wav',
-        'train_noisy_dir': 'noisy_trainset_28spk_wav',
-        'test_clean_dir': 'clean_testset_wav',
-        'test_noisy_dir': 'noisy_testset_wav'
-    }
-    
-    paths = {}
-    all_found = True
-    
-    print(f"\n📂 Checking dataset at: {base_path}")
-    print("-" * 50)
-    
-    for key, dirname in expected_dirs.items():
-        dir_path = base_path / dirname
-        if dir_path.exists():
-            wav_count = len(list(dir_path.glob('*.wav')))
-            print(f"  ✅ {dirname}: {wav_count} files")
-            paths[key] = str(dir_path)
-        else:
-            print(f"  ❌ {dirname}: Not found")
-            all_found = False
-    
-    print("-" * 50)
-    
-    if not all_found:
-        print("\n⚠️  Some dataset directories are missing!")
-        print("Expected structure:")
-        print(f"  {base_path}/")
-        print("  ├── clean_trainset_28spk_wav/")
-        print("  ├── noisy_trainset_28spk_wav/")
-        print("  ├── clean_testset_wav/")
-        print("  └── noisy_testset_wav/")
+    if gdrive_path is None:
         return None
-    
-    print("\n✅ Dataset ready!")
-    return paths
+
+    root = Path(gdrive_path)
+    if not root.exists():
+        raise FileNotFoundError(f"Google Drive dataset path does not exist: {root}")
+
+    paths = DatasetPaths(
+        train_clean_dir=str(root / "clean_trainset_28spk_wav"),
+        train_noisy_dir=str(root / "noisy_trainset_28spk_wav"),
+        test_clean_dir=str(root / "clean_testset_wav"),
+        test_noisy_dir=str(root / "noisy_testset_wav"),
+    )
+
+    # Validate
+    missing = [p for p in paths.__dict__.values() if not Path(p).exists()]
+    if missing:
+        msg = (
+            "Missing expected dataset folders under gdrive_path.\n"
+            f"gdrive_path={root}\n"
+            "Expected:\n"
+            f"- {paths.train_clean_dir}\n"
+            f"- {paths.train_noisy_dir}\n"
+            f"- {paths.test_clean_dir}\n"
+            f"- {paths.test_noisy_dir}\n"
+        )
+        if gdrive_folder_id:
+            msg += (
+                "\nNote: `gdrive_folder_id` was provided but automatic downloading "
+                "is not implemented in this repo."
+            )
+        raise FileNotFoundError(msg)
+
+    return paths.__dict__.copy()
 
 
 class VoiceBankDEMANDDataset(Dataset):
     """
-    PyTorch Dataset for VoiceBank + DEMAND speech denoising dataset
-    
-    Each sample contains:
-    - noisy: Noisy waveform
-    - clean: Clean waveform  
-    - noisy_stft: STFT of noisy waveform [freq_bins, time_frames, 2]
-    - clean_stft: STFT of clean waveform [freq_bins, time_frames, 2]
-    
-    Args:
-        clean_dir: Path to directory containing clean audio files
-        noisy_dir: Path to directory containing noisy audio files
-        sample_rate: Target sample rate (default: 16000)
-        segment_length: Length of audio segments in samples (default: 32000 = 2 seconds)
-        n_fft: FFT size for STFT (default: 512)
-        hop_length: Hop length for STFT (default: 128)
-        win_length: Window length for STFT (default: 512)
-        train: Whether this is training set (enables random cropping)
+    VoiceBank + DEMAND Dataset for Speech Denoising.
+
+    Each item returns:
+      - clean:      Tensor [T]
+      - noisy:      Tensor [T]
+      - clean_stft: Tensor [F, TT, 2]
+      - noisy_stft: Tensor [F, TT, 2]
+      - filename:   str
     """
-    
+
     def __init__(
         self,
         clean_dir: str,
         noisy_dir: str,
         sample_rate: int = 16000,
-        segment_length: int = 32000,
+        segment_length: Optional[int] = 32000,
+        mode: str = "train",  # "train" | "val" | "test"
         n_fft: int = 512,
         hop_length: int = 128,
         win_length: int = 512,
-        train: bool = True
     ):
         self.clean_dir = Path(clean_dir)
         self.noisy_dir = Path(noisy_dir)
         self.sample_rate = sample_rate
         self.segment_length = segment_length
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.win_length = win_length
-        self.train = train
-        
-        # Get list of audio files
-        self.clean_files = sorted(list(self.clean_dir.glob('*.wav')))
-        self.noisy_files = sorted(list(self.noisy_dir.glob('*.wav')))
-        
-        # Create mapping from filename to path for matching
-        self.clean_map = {f.name: f for f in self.clean_files}
-        self.noisy_map = {f.name: f for f in self.noisy_files}
-        
-        # Find matching pairs (same filename in both directories)
-        self.file_pairs = []
-        for noisy_file in self.noisy_files:
-            if noisy_file.name in self.clean_map:
-                self.file_pairs.append({
-                    'clean': self.clean_map[noisy_file.name],
-                    'noisy': noisy_file
-                })
-        
-        if len(self.file_pairs) == 0:
-            raise ValueError(
-                f"No matching file pairs found between:\n"
-                f"  Clean: {clean_dir} ({len(self.clean_files)} files)\n"
-                f"  Noisy: {noisy_dir} ({len(self.noisy_files)} files)"
+        self.mode = mode
+        self.is_train = mode == "train"
+
+        self.audio_processor = AudioProcessor(
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            sample_rate=sample_rate,
+        )
+
+        if not self.clean_dir.exists():
+            raise FileNotFoundError(f"Clean dir not found: {self.clean_dir}")
+        if not self.noisy_dir.exists():
+            raise FileNotFoundError(f"Noisy dir not found: {self.noisy_dir}")
+
+        clean_files = sorted(self.clean_dir.glob("*.wav"))
+        noisy_files = sorted(self.noisy_dir.glob("*.wav"))
+
+        clean_by_stem = {p.stem: p for p in clean_files}
+        noisy_by_stem = {p.stem: p for p in noisy_files}
+        common = sorted(set(clean_by_stem.keys()) & set(noisy_by_stem.keys()))
+
+        self.file_pairs = [(clean_by_stem[s], noisy_by_stem[s]) for s in common]
+        if not self.file_pairs:
+            raise RuntimeError(
+                "No matching clean/noisy pairs found. "
+                f"clean_dir={self.clean_dir} noisy_dir={self.noisy_dir}"
             )
-        
-        # STFT window
-        self.window = torch.hann_window(win_length)
-        
-        print(f"Dataset loaded: {len(self.file_pairs)} audio pairs")
-    
+
     def __len__(self) -> int:
         return len(self.file_pairs)
-    
-    def _load_audio(self, filepath: Path) -> torch.Tensor:
-        """Load and preprocess audio file"""
-        waveform, sr = torchaudio.load(filepath)
-        
-        # Resample if necessary
-        if sr != self.sample_rate:
-            resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
-            waveform = resampler(waveform)
-        
-        # Convert to mono
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        
-        return waveform.squeeze(0)
-    
-    def _random_crop(self, clean: torch.Tensor, noisy: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Randomly crop audio to segment_length"""
-        length = clean.shape[-1]
-        
-        if length < self.segment_length:
-            # Pad if too short
-            pad_length = self.segment_length - length
-            clean = F.pad(clean, (0, pad_length))
-            noisy = F.pad(noisy, (0, pad_length))
-        elif length > self.segment_length:
-            # Random crop if too long
-            if self.train:
-                start = random.randint(0, length - self.segment_length)
-            else:
-                start = 0  # Use beginning for validation
-            clean = clean[start:start + self.segment_length]
-            noisy = noisy[start:start + self.segment_length]
-        
+
+    def _load_wav(self, path: Path) -> torch.Tensor:
+        wav_np, _ = librosa.load(str(path), sr=self.sample_rate, mono=True)
+        return torch.from_numpy(wav_np).float()
+
+    def _crop_or_pad_pair(self, clean: torch.Tensor, noisy: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Keep full utterance if segment_length is None
+        if self.segment_length is None:
+            min_len = min(clean.numel(), noisy.numel())
+            return clean[:min_len], noisy[:min_len]
+
+        seg = int(self.segment_length)
+        if clean.numel() != noisy.numel():
+            min_len = min(clean.numel(), noisy.numel())
+            clean = clean[:min_len]
+            noisy = noisy[:min_len]
+
+        if self.is_train and clean.numel() > seg:
+            start = random.randint(0, clean.numel() - seg)
+            return clean[start : start + seg], noisy[start : start + seg]
+
+        # For val/test with fixed segments: pad/truncate deterministically
+        if clean.numel() < seg:
+            pad = seg - clean.numel()
+            clean = torch.nn.functional.pad(clean, (0, pad))
+            noisy = torch.nn.functional.pad(noisy, (0, pad))
+        else:
+            clean = clean[:seg]
+            noisy = noisy[:seg]
+
         return clean, noisy
-    
-    def _compute_stft(self, waveform: torch.Tensor) -> torch.Tensor:
-        """Compute STFT of waveform"""
-        stft_out = torch.stft(
-            waveform,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            win_length=self.win_length,
-            window=self.window,
-            return_complex=True,
-            center=True,
-            pad_mode='reflect'
-        )
-        
-        # Convert to real representation [freq, time, 2]
-        stft_real = torch.stack([stft_out.real, stft_out.imag], dim=-1)
-        
-        return stft_real
-    
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """Get a single sample"""
-        pair = self.file_pairs[idx]
-        
-        # Load audio files
-        clean = self._load_audio(pair['clean'])
-        noisy = self._load_audio(pair['noisy'])
-        
-        # Ensure same length
-        min_len = min(clean.shape[-1], noisy.shape[-1])
-        clean = clean[:min_len]
-        noisy = noisy[:min_len]
-        
-        # Random crop to segment length
-        clean, noisy = self._random_crop(clean, noisy)
-        
-        # Compute STFT
-        clean_stft = self._compute_stft(clean)
-        noisy_stft = self._compute_stft(noisy)
-        
+
+    def __getitem__(self, idx: int) -> Dict[str, object]:
+        clean_path, noisy_path = self.file_pairs[idx]
+
+        clean = self._load_wav(clean_path)
+        noisy = self._load_wav(noisy_path)
+
+        clean, noisy = self._crop_or_pad_pair(clean, noisy)
+
+        clean_stft = self.audio_processor.stft(clean).squeeze(0)  # [F, TT, 2]
+        noisy_stft = self.audio_processor.stft(noisy).squeeze(0)
+
         return {
-            'clean': clean,
-            'noisy': noisy,
-            'clean_stft': clean_stft,
-            'noisy_stft': noisy_stft
+            "clean": clean,
+            "noisy": noisy,
+            "clean_stft": clean_stft,
+            "noisy_stft": noisy_stft,
+            "filename": clean_path.name,
         }
 
 
@@ -303,73 +209,50 @@ def create_dataloaders(
     n_fft: int = 512,
     hop_length: int = 128,
     win_length: int = 512,
-    pin_memory: bool = True
 ) -> Tuple[DataLoader, DataLoader]:
     """
-    Create train and validation dataloaders
-    
-    Args:
-        train_clean_dir: Path to clean training audio
-        train_noisy_dir: Path to noisy training audio
-        test_clean_dir: Path to clean test audio
-        test_noisy_dir: Path to noisy test audio
-        sample_rate: Audio sample rate
-        segment_length: Length of audio segments in samples
-        batch_size: Batch size
-        num_workers: Number of data loading workers
-        n_fft: FFT size for STFT
-        hop_length: Hop length for STFT
-        win_length: Window length for STFT
-        pin_memory: Pin memory for faster GPU transfer
-    
-    Returns:
-        train_loader: DataLoader for training
-        val_loader: DataLoader for validation
+    Create train/val dataloaders.
+
+    Note: many repos use the official "test" split as validation during training.
+    That's what this helper does (to match the existing scripts).
     """
-    # Create datasets
-    train_dataset = VoiceBankDEMANDDataset(
+    train_ds = VoiceBankDEMANDDataset(
         clean_dir=train_clean_dir,
         noisy_dir=train_noisy_dir,
         sample_rate=sample_rate,
         segment_length=segment_length,
+        mode="train",
         n_fft=n_fft,
         hop_length=hop_length,
         win_length=win_length,
-        train=True
     )
-    
-    val_dataset = VoiceBankDEMANDDataset(
+    val_ds = VoiceBankDEMANDDataset(
         clean_dir=test_clean_dir,
         noisy_dir=test_noisy_dir,
         sample_rate=sample_rate,
         segment_length=segment_length,
+        mode="val",
         n_fft=n_fft,
         hop_length=hop_length,
         win_length=win_length,
-        train=False
     )
-    
-    # Create dataloaders
+
     train_loader = DataLoader(
-        train_dataset,
+        train_ds,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=True
+        pin_memory=True,
+        drop_last=True,
     )
-    
     val_loader = DataLoader(
-        val_dataset,
+        val_ds,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=False
+        pin_memory=True,
+        drop_last=False,
     )
-    
-    print(f"\nDataloaders created:")
-    print(f"  Training: {len(train_dataset)} samples, {len(train_loader)} batches")
-    print(f"  Validation: {len(val_dataset)} samples, {len(val_loader)} batches")
-    
+
     return train_loader, val_loader
+

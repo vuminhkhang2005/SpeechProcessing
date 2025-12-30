@@ -156,7 +156,13 @@ def load_audio(
 def save_audio(
     filepath: str,
     waveform: torch.Tensor,
-    sample_rate: int = 16000
+    sample_rate: int = 16000,
+    *,
+    reference: Optional[torch.Tensor] = None,
+    match_rms: bool = False,
+    max_gain_db: float = 12.0,
+    min_gain_db: float = -12.0,
+    peak_normalize: bool = False
 ):
     """
     Save audio to file
@@ -165,15 +171,78 @@ def save_audio(
         filepath: Output path
         waveform: Audio tensor
         sample_rate: Sample rate
+        reference: Reference waveform for RMS matching (optional)
+        match_rms: If True, match output RMS to reference RMS (bounded by min/max gain)
+        max_gain_db: Upper bound on RMS gain (dB) when match_rms=True
+        min_gain_db: Lower bound on RMS gain (dB) when match_rms=True
+        peak_normalize: If True, peak-normalize to prevent quiet outputs (not recommended for metrics)
     """
     if isinstance(waveform, torch.Tensor):
-        waveform = waveform.cpu().numpy()
+        waveform = waveform.detach().cpu().numpy()
+
+    if reference is not None and isinstance(reference, torch.Tensor):
+        reference = reference.detach().cpu().numpy()
+    if reference is not None and not isinstance(reference, np.ndarray):
+        reference = np.asarray(reference)
+    waveform = np.asarray(waveform)
     
-    # Normalize to prevent clipping
-    if np.abs(waveform).max() > 1.0:
-        waveform = waveform / np.abs(waveform).max()
+    # Optional RMS matching (useful for listening; avoids "output too quiet")
+    if match_rms and reference is not None:
+        waveform = match_rms_to_reference(
+            waveform,
+            reference,
+            max_gain_db=max_gain_db,
+            min_gain_db=min_gain_db
+        )
+    
+    # Optional peak normalize (for listening only; can distort loudness statistics)
+    if peak_normalize:
+        peak = float(np.max(np.abs(waveform)) + 1e-12)
+        if peak > 0:
+            waveform = waveform / peak * 0.99
+
+    # Normalize down ONLY if clipping would occur
+    peak = float(np.max(np.abs(waveform)) + 1e-12)
+    if peak > 1.0:
+        waveform = waveform / peak * 0.99
     
     sf.write(filepath, waveform, sample_rate)
+
+
+def match_rms_to_reference(
+    waveform: np.ndarray,
+    reference: np.ndarray,
+    *,
+    max_gain_db: float = 12.0,
+    min_gain_db: float = -12.0,
+    eps: float = 1e-8
+) -> np.ndarray:
+    """
+    Scale `waveform` so that its RMS matches `reference` RMS (bounded).
+    """
+    waveform = np.asarray(waveform, dtype=np.float32)
+    reference = np.asarray(reference, dtype=np.float32)
+
+    ref_rms = float(np.sqrt(np.mean(reference ** 2) + eps))
+    out_rms = float(np.sqrt(np.mean(waveform ** 2) + eps))
+
+    # If either is (near) silent, don't touch
+    if ref_rms < 1e-4 or out_rms < 1e-4:
+        return waveform
+
+    gain = ref_rms / out_rms
+    gain_db = 20.0 * np.log10(gain + eps)
+    gain_db = float(np.clip(gain_db, min_gain_db, max_gain_db))
+    gain = 10.0 ** (gain_db / 20.0)
+
+    scaled = waveform * gain
+
+    # Prevent clipping after gain
+    peak = float(np.max(np.abs(scaled)) + eps)
+    if peak > 1.0:
+        scaled = scaled / peak * 0.99
+
+    return scaled
 
 
 def normalize_audio(waveform: torch.Tensor, target_db: float = -25.0) -> torch.Tensor:

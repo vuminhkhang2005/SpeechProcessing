@@ -175,7 +175,8 @@ class SpeechDenoiser:
         self,
         input_path: str,
         output_path: str,
-        chunk_size: Optional[int] = None
+        chunk_size: Optional[int] = None,
+        match_rms: bool = True
     ) -> dict:
         """
         Denoise an audio file
@@ -205,7 +206,13 @@ class SpeechDenoiser:
         enhanced = enhanced[:original_length]
         
         # Save
-        save_audio(output_path, enhanced, self.sample_rate)
+        save_audio(
+            output_path,
+            enhanced,
+            self.sample_rate,
+            reference=waveform,
+            match_rms=match_rms
+        )
         
         processing_time = time.time() - start_time
         rtf = processing_time / (original_length / self.sample_rate)
@@ -296,7 +303,8 @@ class SpeechDenoiser:
         self,
         input_dir: str,
         output_dir: str,
-        extensions: list = ['.wav', '.mp3', '.flac', '.ogg']
+        extensions: list = ['.wav', '.mp3', '.flac', '.ogg'],
+        match_rms: bool = True
     ) -> list:
         """
         Denoise all audio files in a directory
@@ -326,7 +334,11 @@ class SpeechDenoiser:
             output_path = output_dir / audio_file.name
             
             try:
-                result = self.denoise_file(str(audio_file), str(output_path))
+                result = self.denoise_file(
+                    str(audio_file),
+                    str(output_path),
+                    match_rms=match_rms
+                )
                 results.append(result)
             except Exception as e:
                 print(f"Error processing {audio_file}: {e}")
@@ -354,6 +366,11 @@ def main():
                         help='Device (cuda/cpu)')
     parser.add_argument('--chunk_size', type=int, default=160000,
                         help='Chunk size for processing (10 seconds at 16kHz)')
+    parser.add_argument(
+        '--no_match_rms',
+        action='store_true',
+        help='Disable RMS matching (by default output RMS is matched to input for listening)'
+    )
     
     args = parser.parse_args()
     
@@ -374,12 +391,14 @@ def main():
     )
     
     # Process
+    match_rms = not args.no_match_rms
     if args.input is not None:
         # Single file
         print(f"\nProcessing: {args.input}")
         result = denoiser.denoise_file(
             args.input, args.output,
-            chunk_size=args.chunk_size
+            chunk_size=args.chunk_size,
+            match_rms=match_rms
         )
         print(f"Output saved to: {result['output_path']}")
         print(f"Duration: {result['duration']:.2f}s")
@@ -388,7 +407,11 @@ def main():
     else:
         # Directory
         print(f"\nProcessing directory: {args.input_dir}")
-        results = denoiser.denoise_directory(args.input_dir, args.output_dir)
+        results = denoiser.denoise_directory(
+            args.input_dir,
+            args.output_dir,
+            match_rms=match_rms
+        )
         
         # Summary
         successful = [r for r in results if 'error' not in r]
