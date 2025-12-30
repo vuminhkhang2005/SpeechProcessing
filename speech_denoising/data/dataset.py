@@ -15,9 +15,9 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-import torchaudio
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+import librosa
 
 
 def is_colab() -> bool:
@@ -212,18 +212,9 @@ class VoiceBankDEMANDDataset(Dataset):
     
     def _load_audio(self, filepath: Path) -> torch.Tensor:
         """Load and preprocess audio file"""
-        waveform, sr = torchaudio.load(filepath)
-        
-        # Resample if necessary
-        if sr != self.sample_rate:
-            resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
-            waveform = resampler(waveform)
-        
-        # Convert to mono
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        
-        return waveform.squeeze(0)
+        # Use librosa for maximum portability (no torchaudio dependency).
+        wav, _sr = librosa.load(str(filepath), sr=self.sample_rate, mono=True)
+        return torch.from_numpy(wav).float()
     
     def _random_crop(self, clean: torch.Tensor, noisy: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Randomly crop audio to segment_length"""

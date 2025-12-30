@@ -12,6 +12,7 @@ import os
 import sys
 import argparse
 import yaml
+import copy
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional
@@ -125,6 +126,8 @@ class Trainer:
         self.early_stopping_patience = train_cfg.get('early_stopping_patience', 15)
         self.best_val_loss = float('inf')
         self.patience_counter = 0
+        # Keep best weights in-memory so the final model is the best one.
+        self.best_state_dict = None
         
         # Training state
         self.current_epoch = 0
@@ -402,6 +405,7 @@ class Trainer:
             if is_best:
                 self.best_val_loss = val_loss
                 self.patience_counter = 0
+                self.best_state_dict = copy.deepcopy(self.model.state_dict())
             else:
                 self.patience_counter += 1
             
@@ -413,6 +417,10 @@ class Trainer:
             if self.patience_counter >= self.early_stopping_patience:
                 print(f"\nEarly stopping at epoch {epoch}")
                 break
+        
+        # Restore best weights (common expectation when using early stopping)
+        if self.best_state_dict is not None:
+            self.model.load_state_dict(self.best_state_dict)
         
         self.writer.close()
         print("\nTraining completed!")

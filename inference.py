@@ -40,7 +40,9 @@ class SpeechDenoiser:
         n_fft: int = 512,
         hop_length: int = 128,
         win_length: int = 512,
-        sample_rate: int = 16000
+        sample_rate: int = 16000,
+        match_input_rms: bool = False,
+        target_db: Optional[float] = None,
     ):
         """
         Args:
@@ -61,6 +63,8 @@ class SpeechDenoiser:
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
+        self.match_input_rms = match_input_rms
+        self.target_db = target_db
         
         # Audio processor
         self.audio_processor = AudioProcessor(
@@ -205,7 +209,13 @@ class SpeechDenoiser:
         enhanced = enhanced[:original_length]
         
         # Save
-        save_audio(output_path, enhanced, self.sample_rate)
+        save_audio(
+            output_path,
+            enhanced,
+            self.sample_rate,
+            match_rms_to=waveform if self.match_input_rms else None,
+            target_db=None if self.match_input_rms else self.target_db,
+        )
         
         processing_time = time.time() - start_time
         rtf = processing_time / (original_length / self.sample_rate)
@@ -354,6 +364,17 @@ def main():
                         help='Device (cuda/cpu)')
     parser.add_argument('--chunk_size', type=int, default=160000,
                         help='Chunk size for processing (10 seconds at 16kHz)')
+    parser.add_argument(
+        '--match_input_rms',
+        action='store_true',
+        help='Match output RMS loudness to the input (helps avoid quiet output)',
+    )
+    parser.add_argument(
+        '--target_db',
+        type=float,
+        default=None,
+        help='Optional fixed output RMS level in dBFS (ignored if --match_input_rms is set)',
+    )
     
     args = parser.parse_args()
     
@@ -370,7 +391,9 @@ def main():
     # Create denoiser
     denoiser = SpeechDenoiser(
         checkpoint_path=args.checkpoint,
-        device=args.device
+        device=args.device,
+        match_input_rms=args.match_input_rms,
+        target_db=args.target_db,
     )
     
     # Process

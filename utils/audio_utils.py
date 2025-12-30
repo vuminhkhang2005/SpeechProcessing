@@ -5,7 +5,7 @@ Compatible with Google Colab (no torchaudio dependency)
 
 import torch
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
 import librosa
 import soundfile as sf
 
@@ -156,7 +156,10 @@ def load_audio(
 def save_audio(
     filepath: str,
     waveform: torch.Tensor,
-    sample_rate: int = 16000
+    sample_rate: int = 16000,
+    match_rms_to: Optional[Union[torch.Tensor, np.ndarray]] = None,
+    target_db: Optional[float] = None,
+    prevent_clipping: bool = True,
 ):
     """
     Save audio to file
@@ -166,14 +169,39 @@ def save_audio(
         waveform: Audio tensor
         sample_rate: Sample rate
     """
-    if isinstance(waveform, torch.Tensor):
-        waveform = waveform.cpu().numpy()
-    
-    # Normalize to prevent clipping
-    if np.abs(waveform).max() > 1.0:
-        waveform = waveform / np.abs(waveform).max()
-    
-    sf.write(filepath, waveform, sample_rate)
+    def _to_numpy(x: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().numpy()
+        return x
+
+    def _rms(x: np.ndarray) -> float:
+        x = np.asarray(x, dtype=np.float32)
+        return float(np.sqrt(np.mean(x * x) + 1e-8))
+
+    wav = _to_numpy(waveform).astype(np.float32, copy=False)
+
+    # Optional loudness handling:
+    # - match_rms_to: scale output to have the same RMS as reference (often the noisy input)
+    # - target_db: scale output to a fixed RMS level (dBFS) for convenient listening
+    if match_rms_to is not None:
+        ref = _to_numpy(match_rms_to).astype(np.float32, copy=False)
+        ref_rms = _rms(ref)
+        out_rms = _rms(wav)
+        if out_rms > 0:
+            wav = wav * (ref_rms / out_rms)
+    elif target_db is not None:
+        out_rms = _rms(wav)
+        target_rms = float(10 ** (target_db / 20))
+        if out_rms > 0:
+            wav = wav * (target_rms / out_rms)
+
+    # Prevent clipping, but do NOT auto-amplify quiet files.
+    if prevent_clipping:
+        peak = float(np.max(np.abs(wav))) if wav.size else 0.0
+        if peak > 1.0:
+            wav = wav / peak
+
+    sf.write(filepath, wav, sample_rate)
 
 
 def normalize_audio(waveform: torch.Tensor, target_db: float = -25.0) -> torch.Tensor:
