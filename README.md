@@ -17,6 +17,15 @@ This project implements a **speech enhancement/denoising** system that removes b
 - **GUI Application**: User-friendly interface built with tkinter
 - **Real-time Demo**: Live microphone denoising capability
 
+### Anti "Lazy Learning" Features
+
+This project includes several features to prevent the model from "lazy learning" (just reducing volume instead of actually denoising):
+
+- **SI-SDR Loss**: Scale-Invariant SDR loss ensures the model focuses on quality, not just amplitude reduction
+- **Energy Conservation Loss**: Penalizes the model if output energy differs too much from target
+- **Global Normalization**: Uses dataset-wide mean/std instead of per-file normalization to avoid inconsistent training
+- **Amplitude Matching**: Post-processing to ensure output has similar amplitude to input
+
 ## Architecture
 
 ```
@@ -204,6 +213,8 @@ Edit `config.yaml` to customize training parameters:
 data:
   sample_rate: 16000
   segment_length: 32000  # 2 seconds
+  normalization:
+    type: "global"  # Use dataset-wide statistics
 
 stft:
   n_fft: 512
@@ -215,11 +226,23 @@ model:
   encoder_channels: [32, 64, 128, 256, 512]
   use_attention: true
   dropout: 0.1
+  mask_type: "CRM"  # Complex Ratio Mask
 
 training:
   batch_size: 16
-  num_epochs: 100
+  num_epochs: 150  # Train longer for better results
   learning_rate: 0.0001
+  early_stopping:
+    patience: 25
+    restore_best_weights: true
+
+# Loss weights - Important for preventing lazy learning
+loss:
+  l1_weight: 1.0
+  magnitude_weight: 1.0
+  si_sdr_weight: 0.5      # Scale-Invariant SDR (anti lazy-learning)
+  energy_weight: 0.1      # Energy conservation
+  perceptual_weight: 0.2  # Mel-spectrogram loss
 ```
 
 ## Project Structure
@@ -251,11 +274,77 @@ speech_denoising/
 └── README.md
 ```
 
+## Troubleshooting
+
+### Problem: Output audio is too quiet / volume is reduced
+
+This is a common issue with denoising models ("lazy learning"). Solutions:
+
+1. **Check SI-SDR loss weight** in `config.yaml`:
+   ```yaml
+   loss:
+     si_sdr_weight: 0.5  # Increase if volume is still reduced
+     energy_weight: 0.1  # Helps preserve energy
+   ```
+
+2. **Enable amplitude matching** during inference:
+   ```bash
+   python inference.py --input noisy.wav --output clean.wav --checkpoint best_model.pt --match_amplitude
+   ```
+
+3. **Check normalization**: The model uses global normalization (dataset-wide mean/std). If using a custom dataset, ensure the normalizer stats are saved and loaded correctly.
+
+### Problem: Training stops too early (EarlyStopping)
+
+Increase the patience in `config.yaml`:
+```yaml
+training:
+  early_stopping:
+    patience: 25  # Increase from default 15
+    restore_best_weights: true  # Important!
+```
+
+### Problem: Output audio sounds distorted/muffled
+
+1. **Check phase reconstruction**: The model preserves phase from input STFT. Ensure STFT parameters match between training and inference.
+
+2. **Try different mask type**:
+   ```yaml
+   model:
+     mask_type: "CRM"  # Try "IRM" or "direct" if CRM doesn't work well
+   ```
+
+3. **Train for more epochs**: The model may need more training for better quality.
+
+### Problem: Inconsistent results between files
+
+This is often due to per-file normalization. The project now uses global normalization to avoid this issue. Make sure you're using the latest version.
+
 ## Notes
 
 - **PESQ Installation**: PESQ requires C compilation. On Windows, install Microsoft Visual C++ Build Tools. The system works without PESQ if unavailable.
 - **GPU Training**: Recommended for faster training. Enable with CUDA-compatible GPU.
 - **Training Time**: ~2-4 hours on CPU, significantly faster on GPU.
+
+## Technical Improvements
+
+This implementation includes several improvements over basic denoising models:
+
+1. **Global Normalization**: Uses dataset-wide statistics (mean=0, std=1) instead of per-file normalization, following LeCun's recommendations for training stability.
+
+2. **SI-SDR Loss**: Scale-Invariant SDR loss that focuses on signal quality regardless of amplitude. This prevents the model from "cheating" by just reducing volume.
+
+3. **Energy Conservation Loss**: Ensures output energy is within 60-140% of target energy, preventing excessive volume changes.
+
+4. **Improved EarlyStopping**: 
+   - Higher patience (25 epochs instead of 15)
+   - Minimum delta threshold for improvement detection
+   - `restore_best_weights=True` to restore the best model when training stops
+
+5. **Proper Output Post-processing**:
+   - Denormalization to restore original amplitude scale
+   - Amplitude matching with input
+   - Anti-clipping processing
 
 ## License
 

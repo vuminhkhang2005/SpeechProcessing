@@ -569,3 +569,286 @@ class NoiseAwarenessLoss(nn.Module):
         
         # Phạt nếu không giảm được noise
         return F.relu(noise_ratio - 0.5).mean()  # Yêu cầu giảm ít nhất 50% noise
+
+
+class SpectralFlatnessLoss(nn.Module):
+    """
+    Loss để ngăn output bị "dull" hoặc "muffled"
+    
+    Spectral flatness đo độ phẳng của phổ - voice nên có spectral structure rõ ràng
+    """
+    
+    def __init__(self, eps: float = 1e-8):
+        super().__init__()
+        self.eps = eps
+    
+    def _spectral_flatness(self, magnitude: torch.Tensor) -> torch.Tensor:
+        """
+        Tính spectral flatness = geometric_mean / arithmetic_mean
+        """
+        # magnitude: [batch, freq, time]
+        log_mag = torch.log(magnitude + self.eps)
+        geo_mean = torch.exp(torch.mean(log_mag, dim=1))  # [batch, time]
+        arith_mean = torch.mean(magnitude, dim=1) + self.eps  # [batch, time]
+        
+        flatness = geo_mean / arith_mean
+        return flatness.mean(dim=-1)  # [batch]
+    
+    def forward(
+        self,
+        pred_stft: torch.Tensor,
+        target_stft: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Phạt nếu pred quá phẳng (thiếu harmonic structure) so với target
+        """
+        # Get magnitude
+        pred_mag = torch.sqrt(pred_stft[:, 0] ** 2 + pred_stft[:, 1] ** 2 + self.eps)
+        target_mag = torch.sqrt(target_stft[:, 0] ** 2 + target_stft[:, 1] ** 2 + self.eps)
+        
+        pred_flatness = self._spectral_flatness(pred_mag)
+        target_flatness = self._spectral_flatness(target_mag)
+        
+        # Phạt nếu pred phẳng hơn target quá nhiều
+        diff = pred_flatness - target_flatness
+        return F.relu(diff).mean()
+
+
+class PerceptualLoss(nn.Module):
+    """
+    Perceptual loss dựa trên Mel spectrogram
+    
+    Mel scale gần với cảm nhận của tai người hơn linear STFT
+    """
+    
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        n_fft: int = 512,
+        hop_length: int = 128,
+        n_mels: int = 80,
+        loss_type: str = 'l1'
+    ):
+        super().__init__()
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.n_mels = n_mels
+        self.loss_type = loss_type
+        
+        # Create mel filterbank
+        # Note: We'll compute this dynamically to handle different devices
+        self.sample_rate = sample_rate
+        self._mel_basis = None
+    
+    def _get_mel_basis(self, device: torch.device) -> torch.Tensor:
+        """Get mel filterbank, creating if needed"""
+        if self._mel_basis is None or self._mel_basis.device != device:
+            import librosa
+            mel_basis = librosa.filters.mel(
+                sr=self.sample_rate,
+                n_fft=self.n_fft,
+                n_mels=self.n_mels,
+                fmin=0,
+                fmax=self.sample_rate // 2
+            )
+            self._mel_basis = torch.from_numpy(mel_basis).float().to(device)
+        return self._mel_basis
+    
+    def _to_mel(self, stft: torch.Tensor) -> torch.Tensor:
+        """Convert STFT to mel spectrogram"""
+        # stft: [batch, 2, freq, time]
+        magnitude = torch.sqrt(stft[:, 0] ** 2 + stft[:, 1] ** 2 + 1e-8)
+        
+        mel_basis = self._get_mel_basis(stft.device)
+        mel = torch.matmul(mel_basis, magnitude)
+        
+        # Log mel
+        mel = torch.log(mel + 1e-8)
+        return mel
+    
+    def forward(
+        self,
+        pred_stft: torch.Tensor,
+        target_stft: torch.Tensor
+    ) -> torch.Tensor:
+        pred_mel = self._to_mel(pred_stft)
+        target_mel = self._to_mel(target_stft)
+        
+        if self.loss_type == 'l1':
+            return F.l1_loss(pred_mel, target_mel)
+        else:
+            return F.mse_loss(pred_mel, target_mel)
+
+
+class AmplitudeRatioLoss(nn.Module):
+    """
+    Loss để đảm bảo output có amplitude tương đương với target
+    
+    Khác với EnergyConservationLoss, loss này so sánh ratio của peak amplitudes
+    """
+    
+    def __init__(self, target_ratio: float = 1.0, margin: float = 0.2):
+        super().__init__()
+        self.target_ratio = target_ratio
+        self.margin = margin
+    
+    def forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor
+    ) -> torch.Tensor:
+        if pred.dim() == 3:
+            pred = pred.squeeze(1)
+        if target.dim() == 3:
+            target = target.squeeze(1)
+        
+        # Peak amplitude ratio
+        pred_peak = torch.max(torch.abs(pred), dim=-1)[0]
+        target_peak = torch.max(torch.abs(target), dim=-1)[0] + 1e-8
+        
+        ratio = pred_peak / target_peak
+        
+        # Phạt nếu ratio nằm ngoài khoảng cho phép
+        low_penalty = F.relu(self.target_ratio - self.margin - ratio)
+        high_penalty = F.relu(ratio - self.target_ratio - self.margin)
+        
+        return (low_penalty + high_penalty).mean()
+
+
+class CombinedDenoiserLoss(nn.Module):
+    """
+    Combined loss function với tất cả components - PHIÊN BẢN ĐẦY ĐỦ NHẤT
+    
+    Includes:
+    1. STFT domain losses (complex L1, magnitude L1)
+    2. Multi-resolution STFT loss
+    3. SI-SDR loss (chống lazy learning)
+    4. Time domain L1 loss
+    5. Energy conservation loss
+    6. Perceptual (mel) loss
+    7. Amplitude ratio loss
+    
+    Tất cả được kết hợp để đảm bảo model thực sự học denoising, không chỉ giảm volume
+    """
+    
+    def __init__(
+        self,
+        # STFT domain
+        complex_weight: float = 1.0,
+        magnitude_weight: float = 1.0,
+        stft_weight: float = 0.5,
+        
+        # Time domain
+        si_sdr_weight: float = 0.5,
+        time_l1_weight: float = 0.3,
+        
+        # Regularization
+        energy_weight: float = 0.1,
+        amplitude_weight: float = 0.1,
+        
+        # Perceptual
+        perceptual_weight: float = 0.2,
+        
+        # STFT params
+        n_fft: int = 512,
+        hop_length: int = 128,
+        win_length: int = 512,
+        sample_rate: int = 16000
+    ):
+        super().__init__()
+        
+        self.complex_weight = complex_weight
+        self.magnitude_weight = magnitude_weight
+        self.stft_weight = stft_weight
+        self.si_sdr_weight = si_sdr_weight
+        self.time_l1_weight = time_l1_weight
+        self.energy_weight = energy_weight
+        self.amplitude_weight = amplitude_weight
+        self.perceptual_weight = perceptual_weight
+        
+        # Loss components
+        self.complex_loss = ComplexL1Loss()
+        self.magnitude_loss = MagnitudeLoss('l1')
+        self.mr_stft_loss = MultiResolutionSTFTLoss(
+            fft_sizes=[256, 512, 1024, 2048],
+            hop_sizes=[64, 128, 256, 512],
+            win_sizes=[256, 512, 1024, 2048]
+        )
+        self.sdr_loss = SDRLoss(clip_value=30.0)
+        self.time_l1_loss = TimeDomainL1Loss()
+        self.energy_loss = EnergyConservationLoss(min_ratio=0.6, max_ratio=1.4)
+        self.amplitude_loss = AmplitudeRatioLoss(target_ratio=1.0, margin=0.2)
+        self.perceptual_loss = PerceptualLoss(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length
+        )
+        
+        # ISTFT params
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.win_length = win_length
+        self.register_buffer('window', torch.hann_window(win_length))
+    
+    def forward(
+        self,
+        pred_stft: torch.Tensor,
+        target_stft: torch.Tensor,
+        pred_waveform: Optional[torch.Tensor] = None,
+        target_waveform: Optional[torch.Tensor] = None
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute all losses
+        """
+        losses = {}
+        
+        # === STFT Domain ===
+        complex_l = self.complex_loss(pred_stft, target_stft)
+        losses['complex_loss'] = complex_l
+        
+        mag_l = self.magnitude_loss(pred_stft, target_stft)
+        losses['magnitude_loss'] = mag_l
+        
+        # Perceptual loss
+        if self.perceptual_weight > 0:
+            perc_l = self.perceptual_loss(pred_stft, target_stft)
+            losses['perceptual_loss'] = perc_l
+        
+        total = self.complex_weight * complex_l + self.magnitude_weight * mag_l
+        if self.perceptual_weight > 0:
+            total += self.perceptual_weight * perc_l
+        
+        # === Time Domain ===
+        if pred_waveform is not None and target_waveform is not None:
+            # Multi-resolution STFT
+            mr_stft_l = self.mr_stft_loss(pred_waveform, target_waveform)
+            losses['mr_stft_loss'] = mr_stft_l
+            total += self.stft_weight * mr_stft_l
+            
+            # SI-SDR
+            if self.si_sdr_weight > 0:
+                sdr_l = self.sdr_loss(pred_waveform, target_waveform)
+                losses['si_sdr_loss'] = sdr_l
+                total += self.si_sdr_weight * sdr_l
+            
+            # Time L1
+            if self.time_l1_weight > 0:
+                time_l1 = self.time_l1_loss(pred_waveform, target_waveform)
+                losses['time_l1_loss'] = time_l1
+                total += self.time_l1_weight * time_l1
+            
+            # Energy conservation
+            if self.energy_weight > 0:
+                energy_l = self.energy_loss(pred_waveform, target_waveform)
+                losses['energy_loss'] = energy_l
+                total += self.energy_weight * energy_l
+            
+            # Amplitude ratio
+            if self.amplitude_weight > 0:
+                amp_l = self.amplitude_loss(pred_waveform, target_waveform)
+                losses['amplitude_loss'] = amp_l
+                total += self.amplitude_weight * amp_l
+        
+        losses['total_loss'] = total
+        
+        return losses

@@ -1,4 +1,11 @@
 # Speech Denoising Configuration
+# 
+# CẢI TIẾN VỚI:
+# 1. Global normalization thay vì per-file (tránh khuếch đại file yên tĩnh)
+# 2. SI-SDR loss để ngăn "lazy learning" (model chỉ giảm volume)
+# 3. Energy conservation loss để duy trì amplitude
+# 4. EarlyStopping với patience cao hơn và restore_best_weights
+# 5. ReduceLROnPlateau scheduler
 
 # Dataset paths
 # Option 1: Local paths (default)
@@ -26,6 +33,16 @@ data:
   sample_rate: 16000
   segment_length: 32000  # 2 seconds at 16kHz
   
+  # Normalization settings - QUAN TRỌNG!
+  # Sử dụng global normalization (mean=0, std=1) thay vì per-file
+  # Điều này ngăn khuếch đại không hợp lý các file yên tĩnh
+  normalization:
+    type: "global"  # "global" (recommended), "per_file", or "none"
+    # Các giá trị này sẽ được tính từ training set nếu type=global
+    # Hoặc có thể set thủ công nếu đã biết statistics
+    precomputed_mean: null  # Sẽ tự tính
+    precomputed_std: null   # Sẽ tự tính
+  
 # STFT parameters
 stft:
   n_fft: 512
@@ -35,58 +52,95 @@ stft:
 # Model parameters
 model:
   name: "UNetDenoiser"
-  # Encoder channels
-  encoder_channels: [1, 32, 64, 128, 256, 512]
-  # Use attention in bottleneck
+  # Encoder channels - Sử dụng Conv2D/UNet architecture
+  # KHÔNG dùng Dense layers cho dữ liệu chuỗi thời gian
+  encoder_channels: [32, 64, 128, 256, 512]
+  # Use attention in bottleneck (giúp capture long-range dependencies)
   use_attention: true
   # Dropout rate
   dropout: 0.1
+  # Mask type: 'CRM' (Complex Ratio Mask), 'IRM' (Ideal Ratio Mask), 'direct'
+  # CRM works best for complex STFT
+  mask_type: "CRM"
 
 # Training parameters
 training:
   batch_size: 16
-  num_epochs: 100
+  # Tăng số epochs - Theo khuyến cáo, train ít nhất 100-150 epochs
+  num_epochs: 150
   learning_rate: 0.0001
   weight_decay: 0.00001
-  # Learning rate scheduler
+  
+  # Learning rate scheduler - QUAN TRỌNG cho convergence
   scheduler:
     name: "ReduceLROnPlateau"
-    patience: 5
+    # Tăng patience để model có đủ thời gian explore
+    patience: 8
     factor: 0.5
-    min_lr: 0.000001
-  # Early stopping
-  early_stopping_patience: 15
-  # Gradient clipping
+    # Có thể giảm min_lr xuống thấp hơn
+    min_lr: 0.0000001
+  
+  # Early stopping - CẢI TIẾN QUAN TRỌNG
+  early_stopping:
+    # Tăng patience từ 15 lên 25 để tránh stop sớm
+    # Nếu model đạt cực tiểu ở epoch 38, patience=25 sẽ stop ở epoch 63
+    patience: 25
+    # Minimum delta để coi là improvement
+    min_delta: 0.0001
+    # QUAN TRỌNG: Luôn restore best weights khi stop
+    restore_best_weights: true
+    # Monitor validation loss
+    monitor: "val_loss"
+  
+  # Gradient clipping (ngăn gradient explosion)
   grad_clip: 5.0
   # Number of workers for data loading
   num_workers: 4
-  # Mixed precision training
+  # Mixed precision training (faster + less memory)
   use_amp: true
 
 # Loss function - CẢI TIẾN ĐỂ NGĂN LAZY LEARNING
+# 
+# VẤN ĐỀ CHÍNH: Model có thể "lazy learn" bằng cách chỉ giảm volume
+# thay vì thực sự lọc noise. Các loss dưới đây ngăn điều này.
 loss:
-  # STFT domain losses
+  # === STFT Domain Losses ===
   l1_weight: 1.0           # Complex L1 loss weight
   magnitude_weight: 1.0    # Magnitude loss weight
   stft_weight: 0.5         # Multi-resolution STFT loss weight
   
-  # Time domain losses - QUAN TRỌNG!
-  # SI-SDR loss giúp ngăn model chỉ giảm volume
-  si_sdr_weight: 0.5       # Scale-Invariant SDR loss (chống lazy learning)
-  time_l1_weight: 0.3      # Time domain L1 loss
+  # === Time Domain Losses - QUAN TRỌNG! ===
+  # SI-SDR (Scale-Invariant SDR) là KEY để ngăn lazy learning
+  # - Scale-invariant: Không quan tâm âm lượng, chỉ quan tâm chất lượng
+  # - Nếu model chỉ giảm volume, SI-SDR sẽ KHÔNG cải thiện
+  si_sdr_weight: 0.5
   
-  # Regularization
-  energy_weight: 0.1       # Energy conservation (ngăn giảm volume quá nhiều)
+  # Time domain L1 loss
+  time_l1_weight: 0.3
+  
+  # === Regularization Losses ===
+  # Energy conservation: Phạt nếu năng lượng output khác quá nhiều so với target
+  # min_ratio=0.6, max_ratio=1.4: output energy phải trong khoảng 60%-140% của target
+  energy_weight: 0.1
+  
+  # Amplitude ratio: Đảm bảo peak amplitude được bảo toàn
+  amplitude_weight: 0.1
+  
+  # Perceptual (Mel) loss: Gần với cảm nhận của tai người
+  perceptual_weight: 0.2
 
 # Checkpoints and logging
 checkpoint:
   save_dir: "./checkpoints"
   save_every: 5  # Save every N epochs
-  keep_last: 3   # Keep last N checkpoints
+  keep_last: 5   # Tăng từ 3 lên 5 để có thể rollback
 
 logging:
   log_dir: "./logs"
   log_every: 100  # Log every N steps
+  # Log các metrics bổ sung
+  log_audio_samples: true  # Log audio samples để kiểm tra chất lượng
+  log_spectrograms: true   # Log spectrograms
 
 # Evaluation
 eval:
@@ -97,3 +151,18 @@ eval:
   # If pesq is not installed, PESQ metrics will be skipped automatically.
   compute_pesq: true
   compute_stoi: true
+  
+# Output processing - QUAN TRỌNG cho chất lượng âm thanh cuối
+output:
+  # Post-processing normalization
+  # "none": Giữ nguyên output từ model
+  # "match_input": Scale output để match energy của input
+  # "match_reference": Scale output để match reference (nếu có)
+  normalize_type: "match_input"
+  
+  # Clipping prevention
+  prevent_clipping: true
+  clip_threshold: 0.99  # Giữ amplitude dưới ngưỡng này
+  
+  # Denormalization: Khôi phục về scale gốc sau inference
+  denormalize: true
