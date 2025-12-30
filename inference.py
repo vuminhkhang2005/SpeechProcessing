@@ -205,7 +205,13 @@ class SpeechDenoiser:
         enhanced = enhanced[:original_length]
         
         # Save
-        save_audio(output_path, enhanced, self.sample_rate)
+        save_audio(
+            output_path,
+            enhanced,
+            self.sample_rate,
+            normalize="match_rms",
+            reference_waveform=waveform,
+        )
         
         processing_time = time.time() - start_time
         rtf = processing_time / (original_length / self.sample_rate)

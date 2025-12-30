@@ -125,6 +125,7 @@ class Trainer:
         self.early_stopping_patience = train_cfg.get('early_stopping_patience', 15)
         self.best_val_loss = float('inf')
         self.patience_counter = 0
+        self.best_state_dict = None  # for restore_best_weights behavior
         
         # Training state
         self.current_epoch = 0
@@ -402,6 +403,8 @@ class Trainer:
             if is_best:
                 self.best_val_loss = val_loss
                 self.patience_counter = 0
+                # Save best weights in-memory (restore_best_weights=True behavior)
+                self.best_state_dict = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
             else:
                 self.patience_counter += 1
             
@@ -412,10 +415,16 @@ class Trainer:
             # Early stopping
             if self.patience_counter >= self.early_stopping_patience:
                 print(f"\nEarly stopping at epoch {epoch}")
+                if self.best_state_dict is not None:
+                    print("Restoring best model weights before stopping...")
+                    self.model.load_state_dict(self.best_state_dict)
                 break
         
         self.writer.close()
         print("\nTraining completed!")
+        if self.best_state_dict is not None:
+            # Ensure final in-memory model is the best one (even if stopped by max epochs)
+            self.model.load_state_dict(self.best_state_dict)
         print(f"Best validation loss: {self.best_val_loss:.4f}")
         print(f"Checkpoints saved to: {self.ckpt_dir}")
         print(f"Logs saved to: {self.log_dir}")

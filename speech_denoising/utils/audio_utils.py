@@ -156,7 +156,11 @@ def load_audio(
 def save_audio(
     filepath: str,
     waveform: torch.Tensor,
-    sample_rate: int = 16000
+    sample_rate: int = 16000,
+    normalize: str = "peak_if_clipping",
+    reference_waveform: Optional[torch.Tensor] = None,
+    target_dbfs: float = -20.0,
+    clip: bool = True
 ):
     """
     Save audio to file
@@ -165,13 +169,62 @@ def save_audio(
         filepath: Output path
         waveform: Audio tensor
         sample_rate: Sample rate
+        normalize:
+            - "none": no scaling
+            - "peak_if_clipping": only peak-normalize if abs(x).max() > 1.0 (backward compatible)
+            - "peak": peak-normalize to abs(x).max() == 1.0 (if non-silent)
+            - "rms": scale to a fixed RMS level (target_dbfs)
+            - "match_rms": scale RMS to match reference_waveform RMS
+        reference_waveform: reference audio for "match_rms" (e.g., noisy input)
+        target_dbfs: used when normalize="rms"
+        clip: clamp to [-1, 1] before writing
     """
     if isinstance(waveform, torch.Tensor):
         waveform = waveform.cpu().numpy()
+    if isinstance(reference_waveform, torch.Tensor):
+        reference_waveform = reference_waveform.cpu().numpy()
     
-    # Normalize to prevent clipping
-    if np.abs(waveform).max() > 1.0:
-        waveform = waveform / np.abs(waveform).max()
+    waveform = waveform.astype(np.float32, copy=False)
+
+    def _rms(x: np.ndarray) -> float:
+        return float(np.sqrt(np.mean(np.square(x), dtype=np.float64) + 1e-12))
+
+    def _safe_peak_norm(x: np.ndarray, always: bool) -> np.ndarray:
+        peak = float(np.max(np.abs(x)) + 1e-12)
+        if always and peak > 0:
+            return x / peak
+        if (not always) and peak > 1.0:
+            return x / peak
+        return x
+
+    normalize = (normalize or "peak_if_clipping").lower()
+
+    if normalize == "none":
+        pass
+    elif normalize == "peak_if_clipping":
+        waveform = _safe_peak_norm(waveform, always=False)
+    elif normalize == "peak":
+        waveform = _safe_peak_norm(waveform, always=True)
+    elif normalize == "rms":
+        current = _rms(waveform)
+        if current > 0:
+            target = float(10 ** (target_dbfs / 20))
+            waveform = waveform * (target / current)
+    elif normalize == "match_rms":
+        if reference_waveform is None:
+            # Fallback to old behavior if no reference provided
+            waveform = _safe_peak_norm(waveform, always=False)
+        else:
+            ref = reference_waveform.astype(np.float32, copy=False)
+            ref_rms = _rms(ref)
+            cur_rms = _rms(waveform)
+            if cur_rms > 0 and ref_rms > 0:
+                waveform = waveform * (ref_rms / cur_rms)
+    else:
+        raise ValueError(f"Unknown normalize mode: {normalize}")
+
+    if clip:
+        waveform = np.clip(waveform, -1.0, 1.0)
     
     sf.write(filepath, waveform, sample_rate)
 

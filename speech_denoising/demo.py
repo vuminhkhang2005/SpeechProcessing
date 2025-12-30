@@ -150,7 +150,13 @@ def demo_model(checkpoint_path: str = None):
     print("\n4. Saving audio files...")
     save_audio(output_dir / 'demo_clean.wav', clean, 16000)
     save_audio(output_dir / 'demo_noisy.wav', noisy, 16000)
-    save_audio(output_dir / 'demo_enhanced.wav', enhanced.cpu(), 16000)
+    save_audio(
+        output_dir / 'demo_enhanced.wav',
+        enhanced.cpu(),
+        16000,
+        normalize="match_rms",
+        reference_waveform=noisy
+    )
     
     print(f"   Saved to: {output_dir}/")
     print("   - demo_clean.wav")

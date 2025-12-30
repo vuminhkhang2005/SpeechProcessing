@@ -1,4 +1,241 @@
 """
+VoiceBank + DEMAND dataset loader.
+
+Expected directory layout (per README):
+  clean_trainset_28spk_wav/ <-> noisy_trainset_28spk_wav/
+  clean_testset_wav/        <-> noisy_testset_wav/
+
+This module provides:
+  - VoiceBankDEMANDDataset
+  - create_dataloaders
+  - setup_gdrive_dataset (best-effort helper for Colab)
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Optional, Tuple, List
+
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+from utils.audio_utils import AudioProcessor, load_audio
+
+
+def _list_wavs(directory: Path) -> List[Path]:
+    if not directory.exists():
+        raise FileNotFoundError(f"Directory not found: {directory}")
+    files = sorted([p for p in directory.glob("*.wav") if p.is_file()])
+    if not files:
+        raise FileNotFoundError(f"No .wav files found in: {directory}")
+    return files
+
+
+def _pad_or_crop_1d(x: torch.Tensor, length: int, random_crop: bool) -> torch.Tensor:
+    if x.dim() != 1:
+        x = x.view(-1)
+    n = int(x.shape[0])
+    if n == length:
+        return x
+    if n < length:
+        return torch.nn.functional.pad(x, (0, length - n))
+    # n > length
+    if random_crop:
+        start = int(torch.randint(0, n - length + 1, (1,)).item())
+    else:
+        start = 0
+    return x[start : start + length]
+
+
+class VoiceBankDEMANDDataset(Dataset):
+    """
+    Paired clean/noisy dataset.
+
+    Returns dict compatible with train/eval scripts:
+      - clean: [samples]
+      - noisy: [samples]
+      - clean_stft: [freq, time, 2]
+      - noisy_stft: [freq, time, 2]
+      - filename: str
+    """
+
+    def __init__(
+        self,
+        clean_dir: str,
+        noisy_dir: str,
+        sample_rate: int = 16000,
+        segment_length: Optional[int] = 32000,
+        mode: str = "train",
+        n_fft: int = 512,
+        hop_length: int = 128,
+        win_length: int = 512,
+    ):
+        self.clean_dir = Path(clean_dir)
+        self.noisy_dir = Path(noisy_dir)
+        self.sample_rate = int(sample_rate)
+        self.segment_length = segment_length if segment_length is None else int(segment_length)
+        self.mode = mode
+
+        self.audio = AudioProcessor(
+            n_fft=n_fft, hop_length=hop_length, win_length=win_length, sample_rate=self.sample_rate
+        )
+
+        clean_files = _list_wavs(self.clean_dir)
+        noisy_files = _list_wavs(self.noisy_dir)
+
+        clean_map = {p.name: p for p in clean_files}
+        noisy_map = {p.name: p for p in noisy_files}
+
+        common = sorted(set(clean_map.keys()) & set(noisy_map.keys()))
+        if not common:
+            raise RuntimeError(
+                "No paired files found. Ensure clean/noisy folders share the same filenames."
+            )
+
+        self.pairs: List[Tuple[Path, Path, str]] = [(clean_map[n], noisy_map[n], n) for n in common]
+
+    def __len__(self) -> int:
+        return len(self.pairs)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        clean_path, noisy_path, name = self.pairs[idx]
+
+        clean, _ = load_audio(str(clean_path), sample_rate=self.sample_rate, mono=True)
+        noisy, _ = load_audio(str(noisy_path), sample_rate=self.sample_rate, mono=True)
+
+        # Ensure same length before cropping/padding
+        min_len = min(int(clean.shape[0]), int(noisy.shape[0]))
+        clean = clean[:min_len]
+        noisy = noisy[:min_len]
+
+        if self.segment_length is not None:
+            random_crop = self.mode == "train"
+            clean = _pad_or_crop_1d(clean, self.segment_length, random_crop=random_crop)
+            noisy = _pad_or_crop_1d(noisy, self.segment_length, random_crop=random_crop)
+
+        # Light sanitization (avoid NaNs/inf)
+        clean = torch.nan_to_num(clean, nan=0.0, posinf=0.0, neginf=0.0)
+        noisy = torch.nan_to_num(noisy, nan=0.0, posinf=0.0, neginf=0.0)
+
+        clean_stft = self.audio.stft(clean)  # [1, freq, time, 2]
+        noisy_stft = self.audio.stft(noisy)
+
+        # Drop batch dim
+        clean_stft = clean_stft.squeeze(0)
+        noisy_stft = noisy_stft.squeeze(0)
+
+        return {
+            "clean": clean,
+            "noisy": noisy,
+            "clean_stft": clean_stft,
+            "noisy_stft": noisy_stft,
+            "filename": name,
+        }
+
+
+def create_dataloaders(
+    train_clean_dir: str,
+    train_noisy_dir: str,
+    test_clean_dir: Optional[str] = None,
+    test_noisy_dir: Optional[str] = None,
+    sample_rate: int = 16000,
+    segment_length: int = 32000,
+    batch_size: int = 16,
+    num_workers: int = 4,
+    n_fft: int = 512,
+    hop_length: int = 128,
+    win_length: int = 512,
+) -> Tuple[DataLoader, DataLoader]:
+    """
+    Create train/val dataloaders.
+
+    Note: This repo historically uses the official VoiceBank test set as validation.
+    """
+
+    train_ds = VoiceBankDEMANDDataset(
+        clean_dir=train_clean_dir,
+        noisy_dir=train_noisy_dir,
+        sample_rate=sample_rate,
+        segment_length=segment_length,
+        mode="train",
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=win_length,
+    )
+
+    if test_clean_dir is None or test_noisy_dir is None:
+        # Fallback: reuse train set in "val" mode (not ideal, but keeps scripts runnable)
+        val_ds = VoiceBankDEMANDDataset(
+            clean_dir=train_clean_dir,
+            noisy_dir=train_noisy_dir,
+            sample_rate=sample_rate,
+            segment_length=segment_length,
+            mode="val",
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+        )
+    else:
+        val_ds = VoiceBankDEMANDDataset(
+            clean_dir=test_clean_dir,
+            noisy_dir=test_noisy_dir,
+            sample_rate=sample_rate,
+            segment_length=segment_length,
+            mode="val",
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+        )
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=False,
+    )
+
+    return train_loader, val_loader
+
+
+def setup_gdrive_dataset(
+    gdrive_path: Optional[str] = None,
+    gdrive_folder_id: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    """
+    Best-effort helper for Colab. In this workspace it may be unused.
+    Returns dict of resolved directory paths, or None if not found.
+    """
+    if gdrive_path is None:
+        return None
+
+    base = Path(gdrive_path)
+    train_clean = base / "clean_trainset_28spk_wav"
+    train_noisy = base / "noisy_trainset_28spk_wav"
+    test_clean = base / "clean_testset_wav"
+    test_noisy = base / "noisy_testset_wav"
+
+    if not (train_clean.exists() and train_noisy.exists() and test_clean.exists() and test_noisy.exists()):
+        return None
+
+    return {
+        "train_clean_dir": str(train_clean),
+        "train_noisy_dir": str(train_noisy),
+        "test_clean_dir": str(test_clean),
+        "test_noisy_dir": str(test_noisy),
+    }
+
+"""
 Dataset classes and utilities for VoiceBank + DEMAND speech denoising dataset
 
 This module provides:

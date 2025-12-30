@@ -143,7 +143,7 @@ class Evaluator:
         metrics['stoi_improvement'] = metrics['stoi'] - metrics['stoi_noisy']
         metrics['si_sdr_improvement'] = metrics['si_sdr'] - metrics['si_sdr_noisy']
         
-        return metrics, enhanced_wav
+        return metrics, enhanced_wav, noisy_wav
     
     def evaluate_dataset(
         self,
@@ -177,7 +177,7 @@ class Evaluator:
             filename = sample['filename']
             
             # Evaluate
-            metrics, enhanced_wav = self.evaluate_sample(
+            metrics, enhanced_wav, noisy_wav_np = self.evaluate_sample(
                 noisy_stft, clean_wav, noisy_wav
             )
             metrics['filename'] = filename
@@ -188,7 +188,9 @@ class Evaluator:
                 save_audio(
                     str(output_dir / f'enhanced_{filename}'),
                     enhanced_wav,
-                    self.sample_rate
+                    self.sample_rate,
+                    normalize="match_rms",
+                    reference_waveform=noisy_wav_np
                 )
         
         # Create DataFrame

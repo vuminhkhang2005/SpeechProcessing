@@ -36,7 +36,9 @@ stft:
 model:
   name: "UNetDenoiser"
   # Encoder channels
-  encoder_channels: [1, 32, 64, 128, 256, 512]
+  # NOTE: first entry is the output channels of the initial conv (NOT input channels).
+  # Input channels are fixed at 2 (real+imag).
+  encoder_channels: [32, 64, 128, 256, 512]
   # Use attention in bottleneck
   use_attention: true
   # Dropout rate
