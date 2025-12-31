@@ -63,7 +63,8 @@ class SpeechDenoiser:
         sample_rate: int = 16000,
         normalizer_path: Optional[str] = None,
         match_amplitude: bool = True,
-        prevent_clipping: bool = True
+        prevent_clipping: bool = True,
+        strict_load: bool = True,
     ):
         """
         Args:
@@ -87,6 +88,7 @@ class SpeechDenoiser:
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
+        self.strict_load = strict_load
         
         # Global normalizer - QUAN TRỌNG để denormalize output đúng cách
         self.normalizer = None
@@ -137,7 +139,12 @@ class SpeechDenoiser:
     
     def _load_model(self, checkpoint_path: str) -> torch.nn.Module:
         """Load model from checkpoint with automatic format conversion"""
-        model, _config = load_model_checkpoint(checkpoint_path, device=self.device, strict=False)
+        model, _config = load_model_checkpoint(
+            checkpoint_path,
+            device=self.device,
+            strict=self.strict_load,
+            n_fft=self.n_fft,
+        )
         return model
     
     @torch.no_grad()
