@@ -51,10 +51,12 @@ stft:
 
 # Model parameters
 model:
-  name: "UNetDenoiser"
+  # Switch to "DCCRN" for the safer/stronger baseline
+  name: "DCCRN"
   # Encoder channels - Sử dụng Conv2D/UNet architecture
   # KHÔNG dùng Dense layers cho dữ liệu chuỗi thời gian
-  encoder_channels: [32, 64, 128, 256, 512]
+  # For DCCRN: channel list is smaller by design (faster + stable)
+  encoder_channels: [16, 32, 64, 128, 256]
   # Use attention in bottleneck (giúp capture long-range dependencies)
   use_attention: true
   # Dropout rate
@@ -62,6 +64,9 @@ model:
   # Mask type: 'CRM' (Complex Ratio Mask), 'IRM' (Ideal Ratio Mask), 'direct'
   # CRM works best for complex STFT
   mask_type: "CRM"
+  # DCCRN RNN config
+  rnn_layers: 2
+  rnn_hidden: 256
 
 # Training parameters
 training:

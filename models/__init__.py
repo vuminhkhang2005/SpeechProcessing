@@ -1,3 +1,4 @@
+from .dccrn import DCCRN, DCCRNConfig  # noqa: F401
 # Models module
 from .unet import (
     UNetDenoiser,

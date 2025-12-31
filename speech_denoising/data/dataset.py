@@ -1,4 +1,25 @@
 """
+Mirror of /workspace/data/dataset.py for scripts under speech_denoising/.
+
+Kept duplicated intentionally so both entrypoints work:
+  - /workspace/train.py expects import data.dataset
+  - /workspace/speech_denoising/train.py expects import data.dataset relative to that folder
+"""
+
+from __future__ import annotations
+
+# Re-export the root implementation by adding repo root to sys.path at runtime.
+# This avoids maintaining two diverging copies while keeping imports stable.
+import sys
+from pathlib import Path
+
+_repo_root = Path(__file__).resolve().parents[2]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
+from data.dataset import *  # noqa: F403,F401
+
+"""
 Dataset class for VoiceBank + DEMAND speech denoising dataset
 
 CẢI TIẾN QUAN TRỌNG:
