@@ -1023,24 +1023,138 @@ class SpeechDenoisingApp:
         self.root.mainloop()
 
 
-def main():
-    """Main entry point"""
-    print("=" * 60)
-    print("🎵 Speech Denoising Application")
-    print("=" * 60)
+def check_dependencies():
+    """Kiểm tra và thông báo về các dependencies cần thiết"""
+    print("Kiểm tra dependencies...")
     print()
     
-    # Check dependencies
-    print("Checking dependencies...")
-    print(f"  PyTorch: {torch.__version__}")
-    print(f"  CUDA available: {torch.cuda.is_available()}")
-    print(f"  Audio playback: {AUDIO_PLAYBACK_AVAILABLE}")
-    print(f"  Visualization: {VISUALIZATION_AVAILABLE}")
+    missing_required = []
+    missing_optional = []
+    
+    # Required dependencies
+    try:
+        import torch
+        print(f"  [OK] PyTorch {torch.__version__}")
+        if torch.cuda.is_available():
+            try:
+                print(f"       CUDA: Có - {torch.cuda.get_device_name(0)}")
+            except Exception:
+                print("       CUDA: Có")
+        else:
+            print("       CUDA: Không (sẽ chạy trên CPU)")
+    except ImportError:
+        missing_required.append("torch")
+        print("  [X] PyTorch - THIẾU")
+    
+    try:
+        import numpy
+        print(f"  [OK] NumPy {numpy.__version__}")
+    except ImportError:
+        missing_required.append("numpy")
+        print("  [X] NumPy - THIẾU")
+    
+    try:
+        import librosa
+        print(f"  [OK] Librosa {librosa.__version__}")
+    except ImportError:
+        missing_required.append("librosa")
+        print("  [X] Librosa - THIẾU")
+    
+    try:
+        import tkinter
+        print("  [OK] Tkinter")
+    except ImportError:
+        missing_required.append("tkinter (python3-tk)")
+        print("  [X] Tkinter - THIẾU")
+    
+    # Optional dependencies
+    try:
+        import sounddevice
+        print(f"  [OK] Sounddevice {sounddevice.__version__} (phát audio)")
+    except ImportError:
+        missing_optional.append("sounddevice")
+        print("  [!] Sounddevice - không có (phát audio sẽ bị tắt)")
+    
+    try:
+        import matplotlib
+        print(f"  [OK] Matplotlib {matplotlib.__version__} (visualization)")
+    except ImportError:
+        missing_optional.append("matplotlib")
+        print("  [!] Matplotlib - không có (visualization sẽ bị tắt)")
+    
+    try:
+        import soundfile
+        print(f"  [OK] Soundfile {soundfile.__version__} (lưu file)")
+    except ImportError:
+        missing_required.append("soundfile")
+        print("  [X] Soundfile - THIẾU")
+    
+    print()
+    
+    # Report missing required
+    if missing_required:
+        print("=" * 55)
+        print("  LỖI: Thiếu các thư viện bắt buộc!")
+        print("=" * 55)
+        print()
+        for m in missing_required:
+            print(f"  - {m}")
+        print()
+        print("Cài đặt với:")
+        print("  pip install -r requirements.txt")
+        print()
+        
+        if "tkinter" in str(missing_required):
+            print("Đối với Tkinter:")
+            print("  Ubuntu/Debian: sudo apt-get install python3-tk")
+            print("  Fedora: sudo dnf install python3-tkinter")
+            print("  macOS: brew install python-tk")
+            print()
+        
+        return False
+    
+    # Report missing optional
+    if missing_optional:
+        print("-" * 55)
+        print("  Cảnh báo: Thiếu một số thư viện tùy chọn")
+        print("-" * 55)
+        print()
+        for m in missing_optional:
+            print(f"  - {m}")
+        print()
+        print("Ứng dụng vẫn chạy được nhưng một số tính năng sẽ bị tắt.")
+        print("Cài đặt thêm: pip install sounddevice matplotlib")
+        print()
+    
+    return True
+
+
+def main():
+    """Main entry point"""
+    print()
+    print("=" * 55)
+    print("  Speech Denoising Application")
+    print("  Khử nhiễu giọng nói bằng Deep Learning")
+    print("=" * 55)
+    print()
+    
+    # Kiểm tra dependencies
+    if not check_dependencies():
+        print("Vui lòng cài đặt các thư viện còn thiếu và thử lại.")
+        sys.exit(1)
+    
+    print("Khởi động ứng dụng...")
     print()
     
     # Run app
-    app = SpeechDenoisingApp()
-    app.run()
+    try:
+        app = SpeechDenoisingApp()
+        app.run()
+    except Exception as e:
+        print(f"Lỗi khi khởi động ứng dụng: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == '__main__':
