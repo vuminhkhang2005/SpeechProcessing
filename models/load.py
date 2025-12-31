@@ -20,11 +20,32 @@ def _get_state_dict(ckpt: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     # raw state dict
     return ckpt  # type: ignore[return-value]
 
+def _infer_arch_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> str:
+    """
+    Best-effort architecture inference when checkpoint has no config.
+
+    We support two families in this repo:
+    - UNetDenoiser (real Conv2d, keys like: init_conv.block.0.weight, encoders.0.conv1.block.0.weight, ...)
+    - DCCRN (complex conv implemented via wr/wi, plus an LSTM bottleneck, keys like:
+      encoders.0.conv.wr.weight, encoders.0.conv.wi.weight, rnn.weight_ih_l0, out_conv_r.weight, ...)
+    """
+    keys = list(state_dict.keys())
+    # Strong DCCRN signals
+    if any(".wr." in k or ".wi." in k for k in keys):
+        return "DCCRN"
+    if any(k.startswith("rnn.") or k.startswith("rnn_proj.") for k in keys):
+        return "DCCRN"
+    if any(k.startswith("out_conv_r.") or k.startswith("out_conv_i.") for k in keys):
+        return "DCCRN"
+    # Default to UNet
+    return "UNetDenoiser"
+
 
 def load_model_checkpoint(
     checkpoint_path: str,
     device: torch.device | None = None,
     strict: bool = False,
+    n_fft: int | None = None,
 ) -> Tuple[torch.nn.Module, Dict[str, Any]]:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -32,15 +53,18 @@ def load_model_checkpoint(
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
     model_cfg = config.get("model", {}) if isinstance(config, dict) else {}
-    model_name = str(model_cfg.get("name", "UNetDenoiser"))
+    model_name = str(model_cfg.get("name", "")).strip()
 
     state_dict = _get_state_dict(ckpt) if isinstance(ckpt, dict) else ckpt
+
+    if not model_name:
+        model_name = _infer_arch_from_state_dict(state_dict)
 
     if model_name.lower() in {"dccrn", "dccrn_denoiser"}:
         # freq bins = n_fft//2 + 1
         stft_cfg = config.get("stft", {}) if isinstance(config, dict) else {}
-        n_fft = int(stft_cfg.get("n_fft", 512))
-        freq_bins = n_fft // 2 + 1
+        effective_n_fft = int(stft_cfg.get("n_fft", n_fft if n_fft is not None else 512))
+        freq_bins = effective_n_fft // 2 + 1
 
         # Minimal config; allow overriding encoder channels + rnn size from yaml
         dcfg = DCCRNConfig(
