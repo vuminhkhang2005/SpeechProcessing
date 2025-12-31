@@ -1012,6 +1012,7 @@ class SettingsTab(ttk.Frame):
         self.callback_handler = ThreadSafeCallback(self)
         
         self.checkpoint_path = tk.StringVar()
+        self.normalizer_path = tk.StringVar()  # Path to normalizer_stats.json
         self.device = tk.StringVar(value="auto")
         
         self._create_widgets()
@@ -1031,6 +1032,24 @@ class SettingsTab(ttk.Frame):
         ttk.Label(ckpt_row, text="Checkpoint:", width=12, anchor="w").pack(side=tk.LEFT)
         ttk.Entry(ckpt_row, textvariable=self.checkpoint_path).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
         ttk.Button(ckpt_row, text="Chon File...", command=self._browse_checkpoint, width=12).pack(side=tk.LEFT)
+        
+        # Normalizer stats selection (QUAN TRONG!)
+        norm_row = ttk.Frame(model_frame)
+        norm_row.pack(fill=tk.X, pady=ModernStyle.PAD_SMALL)
+        
+        ttk.Label(norm_row, text="Normalizer:", width=12, anchor="w").pack(side=tk.LEFT)
+        ttk.Entry(norm_row, textvariable=self.normalizer_path).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
+        ttk.Button(norm_row, text="Chon File...", command=self._browse_normalizer, width=12).pack(side=tk.LEFT)
+        
+        # Normalizer help text
+        norm_help = ttk.Frame(model_frame)
+        norm_help.pack(fill=tk.X)
+        ttk.Label(
+            norm_help,
+            text="  (Tuy chon: file normalizer_stats.json tu training - QUAN TRONG de denoise tot!)",
+            foreground=ModernStyle.WARNING,
+            font=ModernStyle.get_font("small")
+        ).pack(side=tk.LEFT, padx=(0, 0))
         
         # Device selection
         device_row = ttk.Frame(model_frame)
@@ -1137,10 +1156,31 @@ Version 1.0"""
         path = filedialog.askopenfilename(filetypes=filetypes, title="Chon file checkpoint model")
         if path:
             self.checkpoint_path.set(path)
+            # Auto-detect normalizer_stats.json in same directory
+            normalizer_candidates = [
+                Path(path).parent / 'normalizer_stats.json',
+                Path(path).parent.parent / 'normalizer_stats.json',
+                Path(path).parent / 'data' / 'normalizer_stats.json',
+            ]
+            for norm_path in normalizer_candidates:
+                if norm_path.exists():
+                    self.normalizer_path.set(str(norm_path))
+                    break
+    
+    def _browse_normalizer(self):
+        """Browse for normalizer stats file"""
+        filetypes = [
+            ("JSON files", "*.json"),
+            ("All files", "*.*")
+        ]
+        path = filedialog.askopenfilename(filetypes=filetypes, title="Chon file normalizer_stats.json")
+        if path:
+            self.normalizer_path.set(path)
     
     def _load_model(self):
         """Load model from checkpoint"""
         ckpt_path = self.checkpoint_path.get()
+        norm_path = self.normalizer_path.get()
         
         if not ckpt_path:
             messagebox.showwarning("Canh bao", "Vui long chon file checkpoint truoc")
@@ -1150,6 +1190,18 @@ Version 1.0"""
             messagebox.showerror("Loi", f"File khong ton tai:\n{ckpt_path}")
             return
         
+        # Warn if normalizer not specified
+        if not norm_path:
+            result = messagebox.askyesno(
+                "Canh bao",
+                "Ban chua chon file normalizer_stats.json!\n\n"
+                "File nay rat quan trong de denoise dung cach.\n"
+                "Neu model duoc train voi normalization, ket qua se bi sai.\n\n"
+                "Ban co muon tiep tuc khong?"
+            )
+            if not result:
+                return
+        
         self.load_btn.config(state=tk.DISABLED)
         self.load_progress.start(10)
         self.model_status.config(text="Dang tai...", foreground=ModernStyle.INFO)
@@ -1157,17 +1209,23 @@ Version 1.0"""
         def _load():
             try:
                 device = None if self.device.get() == "auto" else self.device.get()
+                # Truyen normalizer_path de denormalize output dung cach
+                normalizer = norm_path if norm_path and os.path.exists(norm_path) else None
                 denoiser = SpeechDenoiser(
                     checkpoint_path=ckpt_path,
-                    device=device
+                    device=device,
+                    normalizer_path=normalizer,
+                    match_amplitude=True,
+                    prevent_clipping=True
                 )
-                self.callback_handler.call(lambda: self._load_complete(denoiser))
+                has_normalizer = denoiser.normalizer is not None
+                self.callback_handler.call(lambda: self._load_complete(denoiser, has_normalizer))
             except Exception as e:
                 self.callback_handler.call(lambda: self._load_error(str(e)))
         
         threading.Thread(target=_load, daemon=True).start()
     
-    def _load_complete(self, denoiser):
+    def _load_complete(self, denoiser, has_normalizer=False):
         """Handle model load complete"""
         self.app.denoiser = denoiser
         
@@ -1175,15 +1233,21 @@ Version 1.0"""
         self.load_progress.stop()
         
         device_str = str(denoiser.device)
-        self.model_status.config(text=f"Da tai ({device_str})", foreground=ModernStyle.SUCCESS)
+        norm_status = "co normalizer" if has_normalizer else "KHONG co normalizer"
+        self.model_status.config(text=f"Da tai ({device_str}, {norm_status})", foreground=ModernStyle.SUCCESS)
         
         # Update status bar
         self.app.status_bar.set_model_status(True, device_str)
         self.app.status_bar.set_status("Model da san sang su dung")
         
+        # Show warning if no normalizer
+        norm_msg = ""
+        if not has_normalizer:
+            norm_msg = "\n\n⚠️ CANH BAO: Khong tim thay normalizer_stats.json!\nNeu model duoc train voi normalization, ket qua co the bi sai."
+        
         messagebox.showinfo(
             "Thanh cong", 
-            f"Da tai model thanh cong!\n\nDevice: {device_str}\n\nBay gio ban co the su dung tab [Khu Nhieu] de xu ly audio."
+            f"Da tai model thanh cong!\n\nDevice: {device_str}\nNormalizer: {'Co' if has_normalizer else 'Khong'}{norm_msg}\n\nBay gio ban co the su dung tab [Khu Nhieu] de xu ly audio."
         )
     
     def _load_error(self, error: str):

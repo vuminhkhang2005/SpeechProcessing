@@ -699,6 +699,7 @@ class SettingsTab(ttk.Frame):
         self.app = app
         
         self.checkpoint_path = tk.StringVar()
+        self.normalizer_path = tk.StringVar()  # Path to normalizer_stats.json
         self.device = tk.StringVar(value="auto")
         
         self._create_widgets()
@@ -718,6 +719,21 @@ class SettingsTab(ttk.Frame):
         ttk.Label(ckpt_row, text="Checkpoint:").pack(side=tk.LEFT)
         ttk.Entry(ckpt_row, textvariable=self.checkpoint_path, width=50).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
         ttk.Button(ckpt_row, text="Chọn...", command=self._browse_checkpoint).pack(side=tk.LEFT)
+        
+        # Normalizer stats selection (QUAN TRỌNG!)
+        norm_row = ttk.Frame(model_frame)
+        norm_row.pack(fill=tk.X, pady=ModernStyle.PAD_SMALL)
+        
+        ttk.Label(norm_row, text="Normalizer:").pack(side=tk.LEFT)
+        ttk.Entry(norm_row, textvariable=self.normalizer_path, width=50).pack(side=tk.LEFT, padx=ModernStyle.PAD_SMALL, expand=True, fill=tk.X)
+        ttk.Button(norm_row, text="Chọn...", command=self._browse_normalizer).pack(side=tk.LEFT)
+        
+        # Normalizer help text
+        ttk.Label(
+            model_frame,
+            text="⚠️ Tùy chọn: file normalizer_stats.json từ training - QUAN TRỌNG để denoise tốt!",
+            foreground=ModernStyle.WARNING
+        ).pack(anchor=tk.W, pady=(0, ModernStyle.PAD_SMALL))
         
         # Device selection
         device_row = ttk.Frame(model_frame)
@@ -777,10 +793,31 @@ Developed with PyTorch and Tkinter"""
         path = filedialog.askopenfilename(filetypes=filetypes)
         if path:
             self.checkpoint_path.set(path)
+            # Auto-detect normalizer_stats.json in same directory
+            normalizer_candidates = [
+                Path(path).parent / 'normalizer_stats.json',
+                Path(path).parent.parent / 'normalizer_stats.json',
+                Path(path).parent / 'data' / 'normalizer_stats.json',
+            ]
+            for norm_path in normalizer_candidates:
+                if norm_path.exists():
+                    self.normalizer_path.set(str(norm_path))
+                    break
+    
+    def _browse_normalizer(self):
+        """Browse for normalizer stats file"""
+        filetypes = [
+            ("JSON files", "*.json"),
+            ("All files", "*.*")
+        ]
+        path = filedialog.askopenfilename(filetypes=filetypes, title="Chọn file normalizer_stats.json")
+        if path:
+            self.normalizer_path.set(path)
     
     def _load_model(self):
         """Load model from checkpoint"""
         ckpt_path = self.checkpoint_path.get()
+        norm_path = self.normalizer_path.get()
         
         if not ckpt_path:
             messagebox.showwarning("Cảnh báo", "Vui lòng chọn file checkpoint")
@@ -790,28 +827,53 @@ Developed with PyTorch and Tkinter"""
             messagebox.showerror("Lỗi", f"File không tồn tại: {ckpt_path}")
             return
         
+        # Warn if normalizer not specified
+        if not norm_path:
+            result = messagebox.askyesno(
+                "Cảnh báo",
+                "Bạn chưa chọn file normalizer_stats.json!\n\n"
+                "File này rất quan trọng để denoise đúng cách.\n"
+                "Nếu model được train với normalization, kết quả sẽ bị sai.\n\n"
+                "Bạn có muốn tiếp tục không?"
+            )
+            if not result:
+                return
+        
         self.load_btn.config(state=tk.DISABLED)
         self.model_status.config(text="Đang tải...")
         
         def _load():
             try:
                 device = None if self.device.get() == "auto" else self.device.get()
+                # Truyền normalizer_path để denormalize output đúng cách
+                normalizer = norm_path if norm_path and os.path.exists(norm_path) else None
                 self.app.denoiser = SpeechDenoiser(
                     checkpoint_path=ckpt_path,
-                    device=device
+                    device=device,
+                    normalizer_path=normalizer,
+                    match_amplitude=True,
+                    prevent_clipping=True
                 )
-                self.after(0, lambda: self._load_complete())
+                has_normalizer = self.app.denoiser.normalizer is not None
+                self.after(0, lambda: self._load_complete(has_normalizer))
             except Exception as e:
                 self.after(0, lambda: self._load_error(str(e)))
         
         threading.Thread(target=_load, daemon=True).start()
     
-    def _load_complete(self):
+    def _load_complete(self, has_normalizer=False):
         """Handle model load complete"""
         self.load_btn.config(state=tk.NORMAL)
         device = self.app.denoiser.device
-        self.model_status.config(text=f"✅ Model đã tải ({device})")
-        messagebox.showinfo("Thành công", f"Đã tải model thành công!\nDevice: {device}")
+        norm_status = "có normalizer" if has_normalizer else "KHÔNG có normalizer"
+        self.model_status.config(text=f"✅ Model đã tải ({device}, {norm_status})")
+        
+        # Show warning if no normalizer
+        norm_msg = ""
+        if not has_normalizer:
+            norm_msg = "\n\n⚠️ CẢNH BÁO: Không tìm thấy normalizer_stats.json!\nNếu model được train với normalization, kết quả có thể bị sai."
+        
+        messagebox.showinfo("Thành công", f"Đã tải model thành công!\n\nDevice: {device}\nNormalizer: {'Có' if has_normalizer else 'Không'}{norm_msg}")
     
     def _load_error(self, error: str):
         """Handle model load error"""
