@@ -34,7 +34,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from models.unet import UNetDenoiser, load_model_checkpoint, convert_old_checkpoint, detect_encoder_channels_from_checkpoint
+from models.load import load_model_checkpoint
 from utils.audio_utils import (
     AudioProcessor, load_audio, save_audio,
     GlobalNormalizer, OutputProcessor,
@@ -137,68 +137,8 @@ class SpeechDenoiser:
     
     def _load_model(self, checkpoint_path: str) -> torch.nn.Module:
         """Load model from checkpoint with automatic format conversion"""
-        try:
-            # Try using the new smart loading function
-            model, config = load_model_checkpoint(
-                checkpoint_path, 
-                device=self.device,
-                strict=False
-            )
-            return model
-        except Exception as e:
-            print(f"Smart loading failed: {e}")
-            print("Trying fallback loading method...")
-            
-            # Fallback to manual loading with conversion
-            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-            
-            # Get state dict
-            if 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-            elif 'state_dict' in checkpoint:
-                state_dict = checkpoint['state_dict']
-            else:
-                state_dict = checkpoint
-            
-            # Get config from checkpoint if available
-            config = checkpoint.get('config', {})
-            model_cfg = config.get('model', {})
-            
-            # Detect encoder channels from checkpoint
-            detected_channels = detect_encoder_channels_from_checkpoint(state_dict)
-            encoder_channels = model_cfg.get('encoder_channels', detected_channels)
-            
-            # Convert old checkpoint format
-            converted_state_dict = convert_old_checkpoint(state_dict)
-            
-            # Create model with detected configuration
-            model = UNetDenoiser(
-                in_channels=model_cfg.get('in_channels', 2),
-                out_channels=model_cfg.get('out_channels', 2),
-                encoder_channels=encoder_channels,
-                use_attention=model_cfg.get('use_attention', True),
-                dropout=0.0,  # No dropout during inference
-                mask_type=model_cfg.get('mask_type', 'CRM')
-            )
-            
-            # Try to load weights with non-strict mode
-            try:
-                model.load_state_dict(converted_state_dict, strict=True)
-            except RuntimeError:
-                # Partial loading
-                model_dict = model.state_dict()
-                pretrained_dict = {k: v for k, v in converted_state_dict.items() 
-                                 if k in model_dict and v.shape == model_dict[k].shape}
-                
-                if not pretrained_dict:
-                    raise RuntimeError("Cannot load any weights from checkpoint. Architecture mismatch.")
-                
-                model_dict.update(pretrained_dict)
-                model.load_state_dict(model_dict)
-                print(f"Loaded {len(pretrained_dict)}/{len(model_dict)} weights (partial load)")
-            
-            model = model.to(self.device)
-            return model
+        model, _config = load_model_checkpoint(checkpoint_path, device=self.device, strict=False)
+        return model
     
     @torch.no_grad()
     def denoise(

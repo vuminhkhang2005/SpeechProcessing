@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from data.dataset import VoiceBankDEMANDDataset, create_dataloaders
 from models.unet import UNetDenoiser
+from models.dccrn import DCCRN, DCCRNConfig
 from models.loss import DenoiserLoss
 from utils.metrics import evaluate_batch, is_pesq_available
 from utils.audio_utils import AudioProcessor
@@ -595,7 +596,9 @@ def main():
                 num_workers=config['training']['num_workers'],
                 n_fft=stft_cfg['n_fft'],
                 hop_length=stft_cfg['hop_length'],
-                win_length=stft_cfg['win_length']
+                win_length=stft_cfg['win_length'],
+                normalization=data_cfg.get('normalization', {"type": "global"}),
+                normalizer_stats_path="./data/normalizer_stats.json"
             )
         else:
             # Use local paths
@@ -610,7 +613,9 @@ def main():
                 num_workers=config['training']['num_workers'],
                 n_fft=stft_cfg['n_fft'],
                 hop_length=stft_cfg['hop_length'],
-                win_length=stft_cfg['win_length']
+                win_length=stft_cfg['win_length'],
+                normalization=data_cfg.get('normalization', {"type": "global"}),
+                normalizer_stats_path="./data/normalizer_stats.json"
             )
     except Exception as e:
         print(f"Error loading dataset: {e}")
@@ -622,14 +627,25 @@ def main():
     
     # Create model
     model_cfg = config['model']
-    model = UNetDenoiser(
-        in_channels=2,
-        out_channels=2,
-        encoder_channels=model_cfg.get('encoder_channels', [32, 64, 128, 256, 512]),
-        use_attention=model_cfg.get('use_attention', True),
-        dropout=model_cfg.get('dropout', 0.1),
-        mask_type='CRM'
-    )
+    model_name = str(model_cfg.get('name', 'UNetDenoiser')).lower()
+    if model_name in {'dccrn', 'dccrn_denoiser'}:
+        n_fft = int(stft_cfg.get('n_fft', 512))
+        freq_bins = n_fft // 2 + 1
+        dcfg = DCCRNConfig(
+            encoder_channels=list(model_cfg.get('encoder_channels', [16, 32, 64, 128, 256])),
+            rnn_layers=int(model_cfg.get('rnn_layers', 2)),
+            rnn_hidden=int(model_cfg.get('rnn_hidden', 256)),
+        )
+        model = DCCRN(freq_bins=freq_bins, cfg=dcfg)
+    else:
+        model = UNetDenoiser(
+            in_channels=2,
+            out_channels=2,
+            encoder_channels=model_cfg.get('encoder_channels', [32, 64, 128, 256, 512]),
+            use_attention=model_cfg.get('use_attention', True),
+            dropout=model_cfg.get('dropout', 0.1),
+            mask_type=model_cfg.get('mask_type', 'CRM')
+        )
     
     print(f"Model: {model_cfg['name']}")
     print(f"Parameters: {model.count_parameters():,}")

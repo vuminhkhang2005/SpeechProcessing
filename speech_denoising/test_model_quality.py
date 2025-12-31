@@ -20,13 +20,12 @@ import sys
 from pathlib import Path
 import numpy as np
 import torch
-import torchaudio
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from models.unet import load_model_checkpoint
-from utils.audio_utils import AudioProcessor
+from models.load import load_model_checkpoint
+from utils.audio_utils import AudioProcessor, load_audio
 from utils.metrics import calculate_si_sdr
 
 
@@ -196,18 +195,14 @@ def process_file(
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Load noisy audio
-    noisy_wav, sr = torchaudio.load(input_path)
-    if sr != 16000:
-        noisy_wav = torchaudio.functional.resample(noisy_wav, sr, 16000)
-    noisy_wav = noisy_wav.mean(dim=0, keepdim=True)  # Mono
+    # Load noisy audio (librosa-based)
+    noisy_1d, _ = load_audio(input_path, sample_rate=16000, mono=True)
+    noisy_wav = noisy_1d.unsqueeze(0)
     
     # Load clean audio if available
     if clean_path and Path(clean_path).exists():
-        clean_wav, sr = torchaudio.load(clean_path)
-        if sr != 16000:
-            clean_wav = torchaudio.functional.resample(clean_wav, sr, 16000)
-        clean_wav = clean_wav.mean(dim=0, keepdim=True)
+        clean_1d, _ = load_audio(clean_path, sample_rate=16000, mono=True)
+        clean_wav = clean_1d.unsqueeze(0)
     else:
         clean_wav = None
         print("⚠️ Không có clean reference, một số metrics sẽ không tính được")
@@ -308,7 +303,9 @@ def main():
         # Save output if requested
         if args.save_output:
             output_tensor = torch.from_numpy(results['output']).unsqueeze(0)
-            torchaudio.save(args.save_output, output_tensor, 16000)
+            from utils.audio_utils import save_audio
+
+            save_audio(args.save_output, output_tensor.squeeze(0), 16000)
             print(f"\n💾 Output saved to: {args.save_output}")
     
     else:
