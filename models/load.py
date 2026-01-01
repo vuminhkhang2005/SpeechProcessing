@@ -4,6 +4,7 @@ Unified checkpoint loading for multiple model architectures.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Callable, Dict, Tuple
 
 import os
@@ -17,6 +18,41 @@ from models.unet import UNetDenoiser, convert_old_checkpoint, detect_encoder_cha
 def _emit(progress: Callable[[str], None] | None, message: str) -> None:
     if progress is not None:
         progress(message)
+
+def _load_state_dict_with_optional_assign(
+    model: torch.nn.Module,
+    state_dict: Dict[str, torch.Tensor],
+    *,
+    strict: bool,
+) -> bool:
+    """
+    Try to use PyTorch's faster path: load_state_dict(..., assign=True) when available.
+
+    - On supported PyTorch versions, assign=True can be significantly faster and reduce RAM copies.
+    - On older versions, it will raise TypeError (unexpected keyword), and we fallback safely.
+
+    Returns:
+        True if assign=True was used, False otherwise.
+    """
+    # Prefer signature detection so the caller can log correctly before loading.
+    try:
+        sig = inspect.signature(model.load_state_dict)
+        if "assign" not in sig.parameters:
+            model.load_state_dict(state_dict, strict=strict)
+            return False
+    except (TypeError, ValueError):
+        # If we cannot inspect the signature, fall back to try/except.
+        pass
+
+    try:
+        model.load_state_dict(state_dict, strict=strict, assign=True)  # type: ignore[call-arg]
+        return True
+    except TypeError as e:
+        # Only swallow the "assign not supported" case; re-raise other TypeErrors.
+        if "assign" not in str(e):
+            raise
+        model.load_state_dict(state_dict, strict=strict)
+        return False
 
 
 def _get_state_dict(ckpt: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -100,9 +136,17 @@ def load_model_checkpoint(
         model = DCCRN(freq_bins=freq_bins, cfg=dcfg)  # build on CPU first
         _emit(progress, f"[2/4] Model built in {time.perf_counter() - t1:.2f}s")
 
-        _emit(progress, "[3/4] Loading weights (load_state_dict)...")
+        # Log the expected path before doing the heavy load.
+        try:
+            supports_assign = "assign" in inspect.signature(model.load_state_dict).parameters
+        except (TypeError, ValueError):
+            supports_assign = False
+        _emit(
+            progress,
+            "[3/4] Loading weights (load_state_dict, assign=True)..." if supports_assign else "[3/4] Loading weights (load_state_dict)...",
+        )
         t2 = time.perf_counter()
-        model.load_state_dict(state_dict, strict=strict)
+        _load_state_dict_with_optional_assign(model, state_dict, strict=strict)
         _emit(progress, f"[3/4] Weights loaded in {time.perf_counter() - t2:.2f}s")
 
         if device.type != "cpu":
@@ -130,9 +174,16 @@ def load_model_checkpoint(
     _emit(progress, f"[2/4] Model built in {time.perf_counter() - t1:.2f}s")
 
     try:
-        _emit(progress, "[3/4] Loading weights (load_state_dict)...")
+        try:
+            supports_assign = "assign" in inspect.signature(model.load_state_dict).parameters
+        except (TypeError, ValueError):
+            supports_assign = False
+        _emit(
+            progress,
+            "[3/4] Loading weights (load_state_dict, assign=True)..." if supports_assign else "[3/4] Loading weights (load_state_dict)...",
+        )
         t2 = time.perf_counter()
-        model.load_state_dict(converted, strict=strict)
+        _load_state_dict_with_optional_assign(model, converted, strict=strict)
         _emit(progress, f"[3/4] Weights loaded in {time.perf_counter() - t2:.2f}s")
     except RuntimeError:
         if strict:
@@ -143,7 +194,13 @@ def load_model_checkpoint(
         model_dict = model.state_dict()
         pretrained = {k: v for k, v in converted.items() if k in model_dict and v.shape == model_dict[k].shape}
         model_dict.update(pretrained)
-        model.load_state_dict(model_dict)
+        try:
+            supports_assign = "assign" in inspect.signature(model.load_state_dict).parameters
+        except (TypeError, ValueError):
+            supports_assign = False
+        if supports_assign:
+            _emit(progress, "[3/4] Partial load (load_state_dict, assign=True)...")
+        _load_state_dict_with_optional_assign(model, model_dict, strict=False)
         _emit(progress, f"[3/4] Partial load done in {time.perf_counter() - t2:.2f}s")
 
     if device.type != "cpu":
