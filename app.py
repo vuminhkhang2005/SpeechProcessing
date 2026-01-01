@@ -570,7 +570,10 @@ class DenoiseTab(ttk.Frame):
                 self.callback_handler.call(lambda: self._process_complete(result, output_audio))
                 
             except Exception as e:
-                self.callback_handler.call(lambda: self._process_error(str(e)))
+                # NOTE: On Python 3.11+, exception variables are cleared after the except block.
+                # Capture the message eagerly so the deferred callback won't crash with NameError.
+                err = str(e)
+                self.callback_handler.call(lambda err=err: self._process_error(err))
         
         threading.Thread(target=_run, daemon=True).start()
     
@@ -1238,7 +1241,10 @@ Version 1.0"""
                 self._last_loaded_signature = signature
                 self.callback_handler.call(lambda: self._load_complete(denoiser, has_normalizer))
             except Exception as e:
-                self.callback_handler.call(lambda: self._load_error(str(e)))
+                # NOTE: On Python 3.11+, exception variables are cleared after the except block.
+                # Capture the message eagerly so the deferred callback won't crash with NameError.
+                err = str(e)
+                self.callback_handler.call(lambda err=err: self._load_error(err))
         
         threading.Thread(target=_load, daemon=True).start()
     
