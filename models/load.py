@@ -19,6 +19,17 @@ def _emit(progress: Callable[[str], None] | None, message: str) -> None:
     if progress is not None:
         progress(message)
 
+def _assign_enabled() -> bool:
+    """
+    Whether to attempt PyTorch's load_state_dict(..., assign=True) fast-path.
+
+    Some PyTorch/Windows builds have been reported to hang in the assign=True path.
+    Allow users to force-disable it via env var:
+      SPEECH_DENOISING_DISABLE_ASSIGN=1
+    """
+    v = os.getenv("SPEECH_DENOISING_DISABLE_ASSIGN", "").strip().lower()
+    return v not in {"1", "true", "yes", "y", "on"}
+
 def _load_state_dict_with_optional_assign(
     model: torch.nn.Module,
     state_dict: Dict[str, torch.Tensor],
@@ -34,6 +45,10 @@ def _load_state_dict_with_optional_assign(
     Returns:
         True if assign=True was used, False otherwise.
     """
+    if not _assign_enabled():
+        model.load_state_dict(state_dict, strict=strict)
+        return False
+
     # Prefer signature detection so the caller can log correctly before loading.
     try:
         sig = inspect.signature(model.load_state_dict)
@@ -138,7 +153,7 @@ def load_model_checkpoint(
 
         # Log the expected path before doing the heavy load.
         try:
-            supports_assign = "assign" in inspect.signature(model.load_state_dict).parameters
+            supports_assign = _assign_enabled() and ("assign" in inspect.signature(model.load_state_dict).parameters)
         except (TypeError, ValueError):
             supports_assign = False
         _emit(
@@ -175,7 +190,7 @@ def load_model_checkpoint(
 
     try:
         try:
-            supports_assign = "assign" in inspect.signature(model.load_state_dict).parameters
+            supports_assign = _assign_enabled() and ("assign" in inspect.signature(model.load_state_dict).parameters)
         except (TypeError, ValueError):
             supports_assign = False
         _emit(
@@ -195,7 +210,7 @@ def load_model_checkpoint(
         pretrained = {k: v for k, v in converted.items() if k in model_dict and v.shape == model_dict[k].shape}
         model_dict.update(pretrained)
         try:
-            supports_assign = "assign" in inspect.signature(model.load_state_dict).parameters
+            supports_assign = _assign_enabled() and ("assign" in inspect.signature(model.load_state_dict).parameters)
         except (TypeError, ValueError):
             supports_assign = False
         if supports_assign:

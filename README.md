@@ -310,6 +310,8 @@ python --version
 
 - **Check RAM and Disk/Swap** while it's stuck (Task Manager / Resource Monitor). If RAM is ~90–100% and Disk/Swap is high, it's swap-thrash: close other apps, use a machine with more RAM, or reduce checkpoint size.
 - **Use local SSD storage** for the checkpoint (avoid network drives like `K:/`). Network drives can make checkpoint reads and tensor materialization behave "unreasonably" slow.
+- **Workaround (Windows/PyTorch hang)**: if RAM/Disk are *not* high but it still hangs at `[3/4]`, try disabling the `assign=True` fast-path:
+  - PowerShell: `setx SPEECH_DENOISING_DISABLE_ASSIGN 1` (then reopen terminal/app), or for one run: `$env:SPEECH_DENOISING_DISABLE_ASSIGN="1"; python app.py`
 
 ### Problem: Output audio is too quiet / volume is reduced
 
