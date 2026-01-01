@@ -316,6 +316,116 @@ class UNetDenoiser(nn.Module):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
+class UNetDenoiserLegacy(nn.Module):
+    """
+    Legacy U-Net variant kept for backward-compatible checkpoint loading.
+
+    Key differences vs `UNetDenoiser`:
+    - No separate `init_conv`; the first encoder consumes `in_channels` directly.
+    - Optional attention in bottleneck (only enabled if checkpoint/config expects it).
+    - Output head can be either a simple `output` 1x1 conv (common in older checkpoints)
+      or the newer `output_conv` stack.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 2,
+        out_channels: int = 2,
+        encoder_channels: List[int] = [32, 64, 128, 256, 512],
+        use_attention: bool = False,
+        dropout: float = 0.0,
+        mask_type: str = "CRM",
+        output_head: str = "output",
+    ):
+        super().__init__()
+
+        self.mask_type = mask_type
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+
+        # Encoder: first block consumes raw input channels
+        self.encoders = nn.ModuleList()
+        prev = in_channels
+        for ch in encoder_channels:
+            self.encoders.append(EncoderBlock(prev, ch, dropout=dropout))
+            prev = ch
+
+        # Bottleneck
+        bottleneck_channels = encoder_channels[-1]
+        self.bottleneck_out_channels = bottleneck_channels * 2
+        self.bottleneck = nn.Sequential(
+            ConvBlock(bottleneck_channels, self.bottleneck_out_channels, 3, padding=1),
+            ConvBlock(self.bottleneck_out_channels, self.bottleneck_out_channels, 3, padding=1),
+        )
+
+        self.attention = AttentionBlock(self.bottleneck_out_channels) if use_attention else None
+
+        # Decoder
+        self.decoders = nn.ModuleList()
+        decoder_in_channels = self.bottleneck_out_channels
+        for i in range(len(encoder_channels) - 1, 0, -1):
+            skip_ch = encoder_channels[i]      # skip at same level
+            out_ch = encoder_channels[i - 1]   # decode to previous level channels
+            self.decoders.append(
+                DecoderBlock(
+                    in_channels=decoder_in_channels,
+                    skip_channels=skip_ch,
+                    out_channels=out_ch,
+                    dropout=dropout,
+                )
+            )
+            decoder_in_channels = out_ch
+
+        # Output head
+        self.output_head = output_head
+        if output_head == "output_conv":
+            self.output_conv = nn.Sequential(
+                nn.Conv2d(encoder_channels[0], encoder_channels[0], 3, padding=1),
+                nn.LeakyReLU(0.2),
+                nn.Conv2d(encoder_channels[0], self.out_channels, 1),
+            )
+            self.output = None
+        else:
+            # Common legacy head: a single 1x1 conv named `output`.
+            self.output = nn.Conv2d(encoder_channels[0], self.out_channels, 1)
+            self.output_conv = None
+
+        # Mask activation based on mask type
+        if mask_type == "IRM":
+            self.mask_activation = nn.Sigmoid()
+        elif mask_type == "CRM":
+            self.mask_activation = nn.Tanh()
+        else:
+            self.mask_activation = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        input_stft = x
+
+        skips = []
+        for encoder in self.encoders:
+            x, skip = encoder(x)
+            skips.append(skip)
+
+        x = self.bottleneck(x)
+        if self.attention is not None:
+            x = self.attention(x)
+
+        skips = skips[::-1]
+        for i, decoder in enumerate(self.decoders):
+            x = decoder(x, skips[i])
+
+        if self.output_conv is not None:
+            output = self.output_conv(x)
+        else:
+            output = self.output(x)
+
+        if self.mask_type in {"IRM", "CRM"}:
+            mask = self.mask_activation(output)  # type: ignore[misc]
+            output = input_stft * mask
+
+        return output
+
+
 class UNetDenoiserLite(nn.Module):
     """
     Lightweight version of UNet for faster inference
@@ -428,6 +538,12 @@ def convert_old_checkpoint(state_dict: Dict[str, torch.Tensor]) -> Dict[str, tor
         
         # Convert output_conv patterns if needed
         new_key = new_key.replace('.output_conv.conv.', '.output_conv.')
+
+        # Common older naming: `output.weight`/`output.bias` for the 1x1 head
+        # (newer code typically uses `output_conv.2.*`).
+        if new_key.startswith("output.") and not new_key.startswith("output_conv."):
+            # Keep as-is; loader may choose a legacy model with `output` head.
+            pass
         
         new_state_dict[new_key] = value
     
@@ -460,7 +576,13 @@ def detect_encoder_channels_from_checkpoint(state_dict: Dict[str, torch.Tensor])
         # Fallback to default
         return [32, 64, 128, 256, 512]
     
-    # Build channel list: [input_ch, enc0_out, enc1_out, ...]
+    # Build channel list for model construction.
+    #
+    # Two historical layouts exist:
+    # - Newer UNet: separate `init_conv` then `encoders.0` consumes init_conv output.
+    #   In this case return: [init_out, enc0_out, enc1_out, ...]
+    # - Legacy UNet: no `init_conv`; `encoders.0` consumes raw in_channels (often 2).
+    #   In this case return: [enc0_out, enc1_out, ...]
     max_idx = max(encoder_indices)
     
     # Get init_conv output channels (first encoder input)
@@ -471,19 +593,24 @@ def detect_encoder_channels_from_checkpoint(state_dict: Dict[str, torch.Tensor])
             break
     
     if init_conv_key:
-        first_channel = state_dict[init_conv_key].shape[0]
-    else:
-        first_channel = 32
-    
-    channels = [first_channel]
+        # Newer layout: include init_conv output as the first entry.
+        first_channel = int(state_dict[init_conv_key].shape[0])
+        channels: List[int] = [first_channel]
+        for i in range(max_idx + 1):
+            if i in encoder_channels:
+                channels.append(int(encoder_channels[i]))
+            else:
+                channels.append(int(channels[-1] * 2))
+        return channels
+
+    # Legacy layout: return encoder outputs only, in order.
+    channels_legacy: List[int] = []
     for i in range(max_idx + 1):
         if i in encoder_channels:
-            channels.append(encoder_channels[i])
+            channels_legacy.append(int(encoder_channels[i]))
         else:
-            # Estimate based on pattern (double channels each layer)
-            channels.append(channels[-1] * 2)
-    
-    return channels
+            channels_legacy.append(int(channels_legacy[-1] * 2) if channels_legacy else 32)
+    return channels_legacy
 
 
 def load_model_checkpoint(
