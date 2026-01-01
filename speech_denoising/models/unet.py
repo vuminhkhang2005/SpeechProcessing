@@ -301,14 +301,23 @@ class UNetDenoiser(nn.Module):
         if self.mask_type == 'IRM':
             # Ideal Ratio Mask - applied to magnitude only
             mask = self.mask_activation(output)
+            # Ensure mask matches input STFT resolution (freq, time)
+            if mask.shape[2:] != input_stft.shape[2:]:
+                mask = F.interpolate(mask, size=input_stft.shape[2:], mode="bilinear", align_corners=False)
             # Apply mask to both real and imaginary parts
             output = input_stft * mask
         elif self.mask_type == 'CRM':
             # Complex Ratio Mask
             mask = self.mask_activation(output)
+            # Ensure mask matches input STFT resolution (freq, time)
+            if mask.shape[2:] != input_stft.shape[2:]:
+                mask = F.interpolate(mask, size=input_stft.shape[2:], mode="bilinear", align_corners=False)
             output = input_stft * mask
         # else: direct output
         
+        # Safety: always return same spatial size as input
+        if output.shape[2:] != input_stft.shape[2:]:
+            output = F.interpolate(output, size=input_stft.shape[2:], mode="bilinear", align_corners=False)
         return output
     
     def count_parameters(self) -> int:
