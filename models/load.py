@@ -50,7 +50,12 @@ def load_model_checkpoint(
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    # PERF: always load checkpoint tensors on CPU first.
+    #
+    # Loading directly to CUDA (map_location=cuda) can be noticeably slower and
+    # may temporarily spike GPU memory during deserialization. We instead load
+    # on CPU, then copy parameters into the model on the target device.
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
     model_cfg = config.get("model", {}) if isinstance(config, dict) else {}
     model_name = str(model_cfg.get("name", "")).strip()
