@@ -700,7 +700,8 @@ class SettingsTab(ttk.Frame):
         
         self.checkpoint_path = tk.StringVar()
         self.normalizer_path = tk.StringVar()  # Path to normalizer_stats.json
-        self.device = tk.StringVar(value="auto")
+        # Safe default: avoid "auto -> CUDA" hanging forever on some setups
+        self.device = tk.StringVar(value="cpu")
         self._last_loaded_signature = None  # (ckpt_path, device, normalizer_path)
         
         self._create_widgets()
@@ -842,6 +843,10 @@ Developed with PyTorch and Tkinter"""
         
         self.load_btn.config(state=tk.DISABLED)
         self.model_status.config(text="Đang tải...")
+
+        def _set_status(msg: str):
+            # thread-safe: schedule UI update on Tk main loop
+            self.after(0, lambda: self.model_status.config(text=msg))
         
         def _load():
             try:
@@ -856,12 +861,15 @@ Developed with PyTorch and Tkinter"""
                     self.after(0, lambda: self._load_complete(has_normalizer))
                     return
 
+                _set_status("Đang khởi tạo loader...")
                 self.app.denoiser = SpeechDenoiser(
                     checkpoint_path=ckpt_path,
                     device=device,
                     normalizer_path=normalizer,
                     match_amplitude=True,
-                    prevent_clipping=True
+                    prevent_clipping=True,
+                    progress_callback=lambda m: _set_status(m),
+                    cuda_probe_timeout_s=10.0,
                 )
                 self._last_loaded_signature = signature
                 has_normalizer = self.app.denoiser.normalizer is not None
