@@ -24,9 +24,10 @@ import os
 import sys
 import argparse
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Callable
 import time
 import json
+import subprocess
 
 import torch
 import numpy as np
@@ -65,6 +66,8 @@ class SpeechDenoiser:
         match_amplitude: bool = True,
         prevent_clipping: bool = True,
         strict_load: bool = True,
+        progress_callback: Optional[Callable[[str], None]] = None,
+        cuda_probe_timeout_s: float = 10.0,
     ):
         """
         Args:
@@ -78,11 +81,23 @@ class SpeechDenoiser:
             match_amplitude: Match output amplitude with input
             prevent_clipping: Prevent output from clipping
         """
-        # Set device
-        if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = torch.device(device)
+        self._progress = progress_callback
+        self._cuda_probe_timeout_s = float(cuda_probe_timeout_s)
+
+        # Set device (with a safe CUDA probe to avoid "hang forever")
+        requested = device
+        if requested is None:
+            requested = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+        if str(requested).startswith("cuda"):
+            if not self._probe_cuda_ok(timeout_s=self._cuda_probe_timeout_s):
+                if self._progress:
+                    self._progress(
+                        f"CUDA init seems stuck (>{self._cuda_probe_timeout_s:.0f}s). Falling back to CPU."
+                    )
+                requested = "cpu"
+
+        self.device = torch.device(requested)
         
         self.sample_rate = sample_rate
         self.n_fft = n_fft
@@ -144,8 +159,30 @@ class SpeechDenoiser:
             device=self.device,
             strict=self.strict_load,
             n_fft=self.n_fft,
+            progress=self._progress,
         )
         return model
+
+    @staticmethod
+    def _probe_cuda_ok(timeout_s: float = 10.0) -> bool:
+        """
+        Probe CUDA init in a subprocess to avoid hanging the main process.
+        If CUDA init is broken/hangs, subprocess will timeout and we fallback to CPU.
+        """
+        try:
+            cmd = [
+                sys.executable,
+                "-c",
+                "import torch; "
+                "assert torch.cuda.is_available(); "
+                "x=torch.zeros(1, device='cuda'); "
+                "torch.cuda.synchronize(); "
+                "print('ok')",
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=timeout_s)
+            return True
+        except Exception:
+            return False
     
     @torch.no_grad()
     def denoise(

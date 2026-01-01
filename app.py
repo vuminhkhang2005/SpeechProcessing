@@ -1013,7 +1013,9 @@ class SettingsTab(ttk.Frame):
         
         self.checkpoint_path = tk.StringVar()
         self.normalizer_path = tk.StringVar()  # Path to normalizer_stats.json
-        self.device = tk.StringVar(value="auto")
+        # Safe default: avoid "auto -> CUDA" hanging forever on some setups
+        self.device = tk.StringVar(value="cpu")
+        self._last_loaded_signature = None  # (ckpt_path, device, normalizer_path)
         
         self._create_widgets()
     
@@ -1205,20 +1207,35 @@ Version 1.0"""
         self.load_btn.config(state=tk.DISABLED)
         self.load_progress.start(10)
         self.model_status.config(text="Dang tai...", foreground=ModernStyle.INFO)
+
+        def _set_status(msg: str):
+            self.callback_handler.call(lambda: self.model_status.config(text=msg, foreground=ModernStyle.INFO))
         
         def _load():
             try:
                 device = None if self.device.get() == "auto" else self.device.get()
                 # Truyen normalizer_path de denormalize output dung cach
                 normalizer = norm_path if norm_path and os.path.exists(norm_path) else None
+                signature = (os.path.abspath(ckpt_path), str(device), os.path.abspath(normalizer) if normalizer else None)
+
+                # If already loaded with same signature, skip reload
+                if self.app.denoiser is not None and self._last_loaded_signature == signature:
+                    has_normalizer = self.app.denoiser.normalizer is not None
+                    self.callback_handler.call(lambda: self._load_complete(self.app.denoiser, has_normalizer))
+                    return
+
+                _set_status("Dang khoi tao loader...")
                 denoiser = SpeechDenoiser(
                     checkpoint_path=ckpt_path,
                     device=device,
                     normalizer_path=normalizer,
                     match_amplitude=True,
-                    prevent_clipping=True
+                    prevent_clipping=True,
+                    progress_callback=lambda m: _set_status(m),
+                    cuda_probe_timeout_s=10.0,
                 )
                 has_normalizer = denoiser.normalizer is not None
+                self._last_loaded_signature = signature
                 self.callback_handler.call(lambda: self._load_complete(denoiser, has_normalizer))
             except Exception as e:
                 self.callback_handler.call(lambda: self._load_error(str(e)))

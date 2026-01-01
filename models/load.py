@@ -4,12 +4,19 @@ Unified checkpoint loading for multiple model architectures.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Dict, Tuple
 
+import os
+import time
 import torch
 
 from models.dccrn import DCCRN, DCCRNConfig
 from models.unet import UNetDenoiser, convert_old_checkpoint, detect_encoder_channels_from_checkpoint
+
+
+def _emit(progress: Callable[[str], None] | None, message: str) -> None:
+    if progress is not None:
+        progress(message)
 
 
 def _get_state_dict(ckpt: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -46,6 +53,7 @@ def load_model_checkpoint(
     device: torch.device | None = None,
     strict: bool = False,
     n_fft: int | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> Tuple[torch.nn.Module, Dict[str, Any]]:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -55,7 +63,16 @@ def load_model_checkpoint(
     # Loading directly to CUDA (map_location=cuda) can be noticeably slower and
     # may temporarily spike GPU memory during deserialization. We instead load
     # on CPU, then copy parameters into the model on the target device.
+    try:
+        size_mb = os.path.getsize(checkpoint_path) / (1024 * 1024)
+        _emit(progress, f"[1/4] Reading checkpoint from disk (~{size_mb:.1f} MB)...")
+    except OSError:
+        _emit(progress, "[1/4] Reading checkpoint from disk...")
+
+    t0 = time.perf_counter()
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    _emit(progress, f"[1/4] Checkpoint loaded in {time.perf_counter() - t0:.2f}s")
+
     config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
     model_cfg = config.get("model", {}) if isinstance(config, dict) else {}
     model_name = str(model_cfg.get("name", "")).strip()
@@ -64,6 +81,9 @@ def load_model_checkpoint(
 
     if not model_name:
         model_name = _infer_arch_from_state_dict(state_dict)
+
+    _emit(progress, f"[2/4] Building model architecture ({model_name})...")
+    t1 = time.perf_counter()
 
     if model_name.lower() in {"dccrn", "dccrn_denoiser"}:
         # freq bins = n_fft//2 + 1
@@ -77,8 +97,21 @@ def load_model_checkpoint(
             rnn_layers=int(model_cfg.get("rnn_layers", 2)),
             rnn_hidden=int(model_cfg.get("rnn_hidden", 256)),
         )
-        model = DCCRN(freq_bins=freq_bins, cfg=dcfg).to(device)
+        model = DCCRN(freq_bins=freq_bins, cfg=dcfg)  # build on CPU first
+        _emit(progress, f"[2/4] Model built in {time.perf_counter() - t1:.2f}s")
+
+        _emit(progress, "[3/4] Loading weights (load_state_dict)...")
+        t2 = time.perf_counter()
         model.load_state_dict(state_dict, strict=strict)
+        _emit(progress, f"[3/4] Weights loaded in {time.perf_counter() - t2:.2f}s")
+
+        if device.type != "cpu":
+            _emit(progress, f"[4/4] Moving model to {device}...")
+            t3 = time.perf_counter()
+            model = model.to(device)
+            _emit(progress, f"[4/4] Model moved in {time.perf_counter() - t3:.2f}s")
+        else:
+            _emit(progress, "[4/4] Using CPU (no device transfer)")
         return model, config
 
     # Default: UNet
@@ -92,18 +125,34 @@ def load_model_checkpoint(
         use_attention=model_cfg.get("use_attention", True),
         dropout=0.0,
         mask_type=model_cfg.get("mask_type", "CRM"),
-    ).to(device)
+    )  # build on CPU first
+
+    _emit(progress, f"[2/4] Model built in {time.perf_counter() - t1:.2f}s")
 
     try:
+        _emit(progress, "[3/4] Loading weights (load_state_dict)...")
+        t2 = time.perf_counter()
         model.load_state_dict(converted, strict=strict)
+        _emit(progress, f"[3/4] Weights loaded in {time.perf_counter() - t2:.2f}s")
     except RuntimeError:
         if strict:
             raise
         # partial load
+        _emit(progress, "[3/4] Weights mismatch; doing partial load...")
+        t2 = time.perf_counter()
         model_dict = model.state_dict()
         pretrained = {k: v for k, v in converted.items() if k in model_dict and v.shape == model_dict[k].shape}
         model_dict.update(pretrained)
         model.load_state_dict(model_dict)
+        _emit(progress, f"[3/4] Partial load done in {time.perf_counter() - t2:.2f}s")
+
+    if device.type != "cpu":
+        _emit(progress, f"[4/4] Moving model to {device}...")
+        t3 = time.perf_counter()
+        model = model.to(device)
+        _emit(progress, f"[4/4] Model moved in {time.perf_counter() - t3:.2f}s")
+    else:
+        _emit(progress, "[4/4] Using CPU (no device transfer)")
 
     return model, config
 
