@@ -191,6 +191,10 @@ speech_denoising/
 
 ## Notes
 
+- **Checkpoint loading appears stuck at `[3/4]`**: This is usually RAM swap/thrash while `load_state_dict` materializes tensors. Convert to a smaller weights-only checkpoint first:
+  - Linux/macOS: `python3 convert_checkpoint.py --input best_model.pt --output best_model_weights.pt --keep-config`
+  - Windows: `python convert_checkpoint.py --input best_model.pt --output best_model_weights.pt --keep-config` (or `py -3 ...`)
+- **Avoid network drives** for checkpoints (e.g. `K:/`). Prefer local SSD.
 - **PESQ Installation**: PESQ requires C compilation. On Windows, install Microsoft Visual C++ Build Tools. The system works without PESQ if unavailable.
 - **GPU Training**: Recommended for faster training. Enable with CUDA-compatible GPU.
 - **Training Time**: ~2-4 hours on CPU, significantly faster on GPU.
