@@ -276,6 +276,41 @@ speech_denoising/
 
 ## Troubleshooting
 
+### Problem: Stuck at `[3/4]` after `assign=True` while loading a checkpoint
+
+If the app appears to freeze at the weights loading step (often shown as `[3/4]`), it's almost always **RAM swap/thrash**: `load_state_dict` must materialize many tensors, and on low-RAM machines it can look like it hangs forever.
+
+**Do this first (most effective): convert to a smaller "weights-only" checkpoint** (drops optimizer state, keeps config if available), then load the new file in the app:
+
+```bash
+# Linux/macOS
+python3 convert_checkpoint.py --input best_model.pt --output best_model_weights.pt --keep-config
+```
+
+On Windows (CMD/PowerShell) you typically don't have `python3`, use:
+
+```bash
+python convert_checkpoint.py --input best_model.pt --output best_model_weights.pt --keep-config
+```
+
+If `python` is not recognized, try:
+
+```bash
+py -3 convert_checkpoint.py --input best_model.pt --output best_model_weights.pt --keep-config
+```
+
+Quick check which one works:
+
+```bash
+py --version
+python --version
+```
+
+**If it's still stuck:**
+
+- **Check RAM and Disk/Swap** while it's stuck (Task Manager / Resource Monitor). If RAM is ~90–100% and Disk/Swap is high, it's swap-thrash: close other apps, use a machine with more RAM, or reduce checkpoint size.
+- **Use local SSD storage** for the checkpoint (avoid network drives like `K:/`). Network drives can make checkpoint reads and tensor materialization behave "unreasonably" slow.
+
 ### Problem: Output audio is too quiet / volume is reduced
 
 This is a common issue with denoising models ("lazy learning"). Solutions:
