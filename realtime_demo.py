@@ -22,8 +22,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from models.unet import UNetDenoiser
 from utils.audio_utils import AudioProcessor
+from models.load import load_model_checkpoint
 
 # Try to import PyAudio
 try:
@@ -79,23 +79,14 @@ class RealtimeDenoiser:
         print(f"Chunk size: {self.chunk_size} samples ({chunk_duration*1000:.0f}ms)")
     
     def _load_model(self, checkpoint_path: str) -> torch.nn.Module:
-        """Load model from checkpoint"""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        
-        config = checkpoint.get('config', {})
-        model_cfg = config.get('model', {})
-        
-        model = UNetDenoiser(
-            in_channels=2,
-            out_channels=2,
-            encoder_channels=model_cfg.get('encoder_channels', [32, 64, 128, 256, 512]),
-            use_attention=model_cfg.get('use_attention', True),
-            dropout=0.0
+        """Load model from checkpoint (supports legacy checkpoints)."""
+        model, _cfg = load_model_checkpoint(
+            checkpoint_path,
+            device=self.device,
+            strict=False,
+            n_fft=512,
+            progress=None,
         )
-        
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model = model.to(self.device)
-        
         return model
     
     @torch.no_grad()

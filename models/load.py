@@ -12,7 +12,12 @@ import time
 import torch
 
 from models.dccrn import DCCRN, DCCRNConfig
-from models.unet import UNetDenoiser, convert_old_checkpoint, detect_encoder_channels_from_checkpoint
+from models.unet import (
+    UNetDenoiser,
+    UNetDenoiserLegacy,
+    convert_old_checkpoint,
+    detect_encoder_channels_from_checkpoint,
+)
 
 
 def _emit(progress: Callable[[str], None] | None, message: str) -> None:
@@ -160,16 +165,53 @@ def load_model_checkpoint(
 
     # Default: UNet
     converted = convert_old_checkpoint(state_dict)
+    keys = set(converted.keys())
+
+    # Heuristic: pick the UNet variant that matches the checkpoint layout.
+    has_init_conv = any(k.startswith("init_conv.") for k in keys)
+    has_attention = any(k.startswith("attention.") for k in keys)
+    has_legacy_output = any(k.startswith("output.") for k in keys)
+
     detected_channels = detect_encoder_channels_from_checkpoint(converted)
     encoder_channels = model_cfg.get("encoder_channels", detected_channels)
-    model = UNetDenoiser(
-        in_channels=model_cfg.get("in_channels", 2),
-        out_channels=model_cfg.get("out_channels", 2),
-        encoder_channels=encoder_channels,
-        use_attention=model_cfg.get("use_attention", True),
-        dropout=0.0,
-        mask_type=model_cfg.get("mask_type", "CRM"),
-    )  # build on CPU first
+
+    in_ch = int(model_cfg.get("in_channels", 2))
+    out_ch = int(model_cfg.get("out_channels", 2))
+    mask_type = str(model_cfg.get("mask_type", "CRM"))
+
+    # Attention compatibility:
+    # - If checkpoint contains attention weights, enable attention.
+    # - If user explicitly configured `use_attention`, respect it in non-strict mode.
+    # - In strict mode, never enable attention unless weights exist in the checkpoint.
+    if "use_attention" in model_cfg:
+        use_attention = bool(model_cfg.get("use_attention"))
+    else:
+        use_attention = has_attention
+    if strict and not has_attention:
+        use_attention = False
+
+    if has_init_conv:
+        model = UNetDenoiser(
+            in_channels=in_ch,
+            out_channels=out_ch,
+            encoder_channels=encoder_channels,
+            use_attention=use_attention,
+            dropout=0.0,
+            mask_type=mask_type,
+        )  # build on CPU first
+    else:
+        # Legacy layout: first encoder consumes raw `in_channels`.
+        # encoder_channels should NOT include `in_channels` here.
+        output_head = "output" if has_legacy_output else "output_conv"
+        model = UNetDenoiserLegacy(
+            in_channels=in_ch,
+            out_channels=out_ch,
+            encoder_channels=encoder_channels,
+            use_attention=use_attention,
+            dropout=0.0,
+            mask_type=mask_type,
+            output_head=output_head,
+        )  # build on CPU first
 
     _emit(progress, f"[2/4] Model built in {time.perf_counter() - t1:.2f}s")
 

@@ -65,7 +65,9 @@ class SpeechDenoiser:
         normalizer_path: Optional[str] = None,
         match_amplitude: bool = True,
         prevent_clipping: bool = True,
-        strict_load: bool = True,
+        # Default False to support older checkpoints whose module names / shapes differ.
+        # Users can set True to enforce an exact architecture match.
+        strict_load: bool = False,
         progress_callback: Optional[Callable[[str], None]] = None,
         cuda_probe_timeout_s: float = 10.0,
     ):
