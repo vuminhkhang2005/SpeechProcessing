@@ -5,6 +5,7 @@ Unified checkpoint loading for multiple model architectures.
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Tuple
+import inspect
 
 import os
 import time
@@ -17,6 +18,35 @@ from models.unet import UNetDenoiser, convert_old_checkpoint, detect_encoder_cha
 def _emit(progress: Callable[[str], None] | None, message: str) -> None:
     if progress is not None:
         progress(message)
+
+
+def _load_state_dict(
+    model: torch.nn.Module,
+    state_dict: Dict[str, torch.Tensor],
+    *,
+    strict: bool,
+    progress: Callable[[str], None] | None,
+) -> None:
+    """
+    Load state dict with best available performance.
+
+    On newer PyTorch versions, `assign=True` can be dramatically faster and use
+    less memory since it avoids extra tensor copies. If unsupported, we fall
+    back to the default behavior.
+    """
+    sig = None
+    try:
+        sig = inspect.signature(model.load_state_dict)
+    except Exception:
+        sig = None
+
+    if sig is not None and "assign" in sig.parameters:
+        _emit(progress, "[3/4] Loading weights (load_state_dict, assign=True)...")
+        model.load_state_dict(state_dict, strict=strict, assign=True)  # type: ignore[call-arg]
+        return
+
+    _emit(progress, "[3/4] Loading weights (load_state_dict)...")
+    model.load_state_dict(state_dict, strict=strict)
 
 
 def _get_state_dict(ckpt: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -100,9 +130,8 @@ def load_model_checkpoint(
         model = DCCRN(freq_bins=freq_bins, cfg=dcfg)  # build on CPU first
         _emit(progress, f"[2/4] Model built in {time.perf_counter() - t1:.2f}s")
 
-        _emit(progress, "[3/4] Loading weights (load_state_dict)...")
         t2 = time.perf_counter()
-        model.load_state_dict(state_dict, strict=strict)
+        _load_state_dict(model, state_dict, strict=strict, progress=progress)
         _emit(progress, f"[3/4] Weights loaded in {time.perf_counter() - t2:.2f}s")
 
         if device.type != "cpu":
@@ -130,9 +159,8 @@ def load_model_checkpoint(
     _emit(progress, f"[2/4] Model built in {time.perf_counter() - t1:.2f}s")
 
     try:
-        _emit(progress, "[3/4] Loading weights (load_state_dict)...")
         t2 = time.perf_counter()
-        model.load_state_dict(converted, strict=strict)
+        _load_state_dict(model, converted, strict=strict, progress=progress)
         _emit(progress, f"[3/4] Weights loaded in {time.perf_counter() - t2:.2f}s")
     except RuntimeError:
         if strict:
@@ -143,7 +171,7 @@ def load_model_checkpoint(
         model_dict = model.state_dict()
         pretrained = {k: v for k, v in converted.items() if k in model_dict and v.shape == model_dict[k].shape}
         model_dict.update(pretrained)
-        model.load_state_dict(model_dict)
+        _load_state_dict(model, model_dict, strict=False, progress=progress)
         _emit(progress, f"[3/4] Partial load done in {time.perf_counter() - t2:.2f}s")
 
     if device.type != "cpu":
