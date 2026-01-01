@@ -276,6 +276,18 @@ speech_denoising/
 
 ## Troubleshooting
 
+### Problem: App gets stuck at `[3/4] Loading weights (load_state_dict...)`
+
+On CPU, this is most often **RAM thrash / swapping** with large checkpoints (especially training checkpoints that include optimizer/scheduler states).
+
+Try converting your checkpoint to a lightweight **weights-only** file (inference only):
+
+```bash
+python3 convert_checkpoint.py --input best_model.pt --output best_model_weights.pt --keep-config
+```
+
+Then load `best_model_weights.pt` in the app.
+
 ### Problem: Output audio is too quiet / volume is reduced
 
 This is a common issue with denoising models ("lazy learning"). Solutions:
