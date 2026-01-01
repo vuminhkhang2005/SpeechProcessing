@@ -700,8 +700,11 @@ class SettingsTab(ttk.Frame):
         
         self.checkpoint_path = tk.StringVar()
         self.normalizer_path = tk.StringVar()  # Path to normalizer_stats.json
-        self.device = tk.StringVar(value="auto")
+        # Safe default: CPU (tránh trường hợp CUDA init bị treo vô hạn trên một số máy)
+        self.device = tk.StringVar(value="cpu")
         self._last_loaded_signature = None  # (ckpt_path, device, normalizer_path)
+        self._load_status_queue = queue.Queue()
+        self._load_started_at = None
         
         self._create_widgets()
     
@@ -841,7 +844,39 @@ Developed with PyTorch and Tkinter"""
                 return
         
         self.load_btn.config(state=tk.DISABLED)
-        self.model_status.config(text="Đang tải...")
+        self._load_started_at = time.time()
+        try:
+            size_mb = os.path.getsize(ckpt_path) / (1024 * 1024)
+            self.model_status.config(text=f"Đang tải... (checkpoint ~{size_mb:.1f} MB)")
+        except Exception:
+            self.model_status.config(text="Đang tải...")
+
+        # Poll queue to show detailed status
+        def _poll_status():
+            drained = False
+            while True:
+                try:
+                    msg = self._load_status_queue.get_nowait()
+                except Exception:
+                    break
+                drained = True
+                elapsed = time.time() - (self._load_started_at or time.time())
+                self.model_status.config(text=f"{msg} ({elapsed:.0f}s)")
+
+            # Keep polling while button disabled (loading)
+            if str(self.load_btn['state']) == str(tk.DISABLED):
+                self.after(200, _poll_status)
+            else:
+                # Drain once at end
+                if not drained:
+                    try:
+                        msg = self._load_status_queue.get_nowait()
+                        elapsed = time.time() - (self._load_started_at or time.time())
+                        self.model_status.config(text=f"{msg} ({elapsed:.0f}s)")
+                    except Exception:
+                        pass
+
+        self.after(0, _poll_status)
         
         def _load():
             try:
@@ -856,12 +891,18 @@ Developed with PyTorch and Tkinter"""
                     self.after(0, lambda: self._load_complete(has_normalizer))
                     return
 
+                def _status(msg: str):
+                    # thread-safe status update through queue
+                    self._load_status_queue.put(msg)
+
+                _status("Chuẩn bị load...")
                 self.app.denoiser = SpeechDenoiser(
                     checkpoint_path=ckpt_path,
                     device=device,
                     normalizer_path=normalizer,
                     match_amplitude=True,
-                    prevent_clipping=True
+                    prevent_clipping=True,
+                    status_callback=_status,
                 )
                 self._last_loaded_signature = signature
                 has_normalizer = self.app.denoiser.normalizer is not None

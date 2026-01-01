@@ -24,7 +24,7 @@ import os
 import sys
 import argparse
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Callable
 import time
 import json
 
@@ -65,6 +65,7 @@ class SpeechDenoiser:
         match_amplitude: bool = True,
         prevent_clipping: bool = True,
         strict_load: bool = True,
+        status_callback: Callable[[str], None] | None = None,
     ):
         """
         Args:
@@ -90,6 +91,9 @@ class SpeechDenoiser:
         self.win_length = win_length
         self.strict_load = strict_load
         
+        if status_callback:
+            status_callback(f"Device: {self.device}")
+
         # Global normalizer - QUAN TRỌNG để denormalize output đúng cách
         self.normalizer = None
         if normalizer_path and Path(normalizer_path).exists():
@@ -131,19 +135,26 @@ class SpeechDenoiser:
         )
         
         # Load model
-        self.model = self._load_model(checkpoint_path)
+        if status_callback:
+            status_callback("Bắt đầu load model từ checkpoint...")
+        self.model = self._load_model(checkpoint_path, status_callback=status_callback)
         self.model.eval()
         
         print(f"Model loaded on {self.device}")
         print(f"Output processing: match_amplitude={match_amplitude}, prevent_clipping={prevent_clipping}")
     
-    def _load_model(self, checkpoint_path: str) -> torch.nn.Module:
+    def _load_model(
+        self,
+        checkpoint_path: str,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> torch.nn.Module:
         """Load model from checkpoint with automatic format conversion"""
         model, _config = load_model_checkpoint(
             checkpoint_path,
             device=self.device,
             strict=self.strict_load,
             n_fft=self.n_fft,
+            status_callback=status_callback,
         )
         return model
     

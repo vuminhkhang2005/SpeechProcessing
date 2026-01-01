@@ -4,7 +4,7 @@ Unified checkpoint loading for multiple model architectures.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Dict, Tuple
 
 import torch
 
@@ -46,6 +46,7 @@ def load_model_checkpoint(
     device: torch.device | None = None,
     strict: bool = False,
     n_fft: int | None = None,
+    status_callback: Callable[[str], None] | None = None,
 ) -> Tuple[torch.nn.Module, Dict[str, Any]]:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -55,7 +56,11 @@ def load_model_checkpoint(
     # Loading directly to CUDA (map_location=cuda) can be noticeably slower and
     # may temporarily spike GPU memory during deserialization. We instead load
     # on CPU, then copy parameters into the model on the target device.
+    if status_callback:
+        status_callback("Đang đọc checkpoint từ ổ đĩa (torch.load)...")
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if status_callback:
+        status_callback("Đã đọc xong checkpoint, đang dựng model...")
     config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
     model_cfg = config.get("model", {}) if isinstance(config, dict) else {}
     model_name = str(model_cfg.get("name", "")).strip()
@@ -78,7 +83,11 @@ def load_model_checkpoint(
             rnn_hidden=int(model_cfg.get("rnn_hidden", 256)),
         )
         model = DCCRN(freq_bins=freq_bins, cfg=dcfg).to(device)
+        if status_callback:
+            status_callback("Đang nạp weights vào model (load_state_dict)...")
         model.load_state_dict(state_dict, strict=strict)
+        if status_callback:
+            status_callback("✅ Đã load xong weights.")
         return model, config
 
     # Default: UNet
@@ -95,6 +104,8 @@ def load_model_checkpoint(
     ).to(device)
 
     try:
+        if status_callback:
+            status_callback("Đang nạp weights vào model (load_state_dict)...")
         model.load_state_dict(converted, strict=strict)
     except RuntimeError:
         if strict:
@@ -105,5 +116,7 @@ def load_model_checkpoint(
         model_dict.update(pretrained)
         model.load_state_dict(model_dict)
 
+    if status_callback:
+        status_callback("✅ Đã load xong weights.")
     return model, config
 
