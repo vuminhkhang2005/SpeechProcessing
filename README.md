@@ -62,6 +62,10 @@ cd speech_denoising
 pip install -r requirements.txt
 ```
 
+### Notebook/Jupyter import note
+
+If you see `ModuleNotFoundError: No module named 'models'` in a notebook, your kernel is running from a directory that isn’t the project root. Re-run the notebook “Models” cell (it auto-detects the repo root), or ensure the folder that contains `models/` is on `sys.path` / `PYTHONPATH`.
+
 ## Dataset
 
 This project uses the **VoiceBank + DEMAND** dataset, widely used in speech enhancement research.
