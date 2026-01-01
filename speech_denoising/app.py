@@ -701,6 +701,7 @@ class SettingsTab(ttk.Frame):
         self.checkpoint_path = tk.StringVar()
         self.normalizer_path = tk.StringVar()  # Path to normalizer_stats.json
         self.device = tk.StringVar(value="auto")
+        self._last_loaded_signature = None  # (ckpt_path, device, normalizer_path)
         
         self._create_widgets()
     
@@ -847,6 +848,14 @@ Developed with PyTorch and Tkinter"""
                 device = None if self.device.get() == "auto" else self.device.get()
                 # Truyền normalizer_path để denormalize output đúng cách
                 normalizer = norm_path if norm_path and os.path.exists(norm_path) else None
+                signature = (os.path.abspath(ckpt_path), str(device), os.path.abspath(normalizer) if normalizer else None)
+
+                # Nếu model đã tải đúng checkpoint + device + normalizer thì không reload nữa
+                if self.app.denoiser is not None and self._last_loaded_signature == signature:
+                    has_normalizer = self.app.denoiser.normalizer is not None
+                    self.after(0, lambda: self._load_complete(has_normalizer))
+                    return
+
                 self.app.denoiser = SpeechDenoiser(
                     checkpoint_path=ckpt_path,
                     device=device,
@@ -854,6 +863,7 @@ Developed with PyTorch and Tkinter"""
                     match_amplitude=True,
                     prevent_clipping=True
                 )
+                self._last_loaded_signature = signature
                 has_normalizer = self.app.denoiser.normalizer is not None
                 self.after(0, lambda: self._load_complete(has_normalizer))
             except Exception as e:
