@@ -331,7 +331,10 @@ class DenoiseTab(ttk.Frame):
                 self.after(0, lambda: self._process_complete(result))
                 
             except Exception as e:
-                self.after(0, lambda: self._process_error(str(e)))
+                # NOTE: On Python 3.11+, exception variables are cleared after the except block.
+                # Capture the message eagerly so the deferred callback won't crash with NameError.
+                err = str(e)
+                self.after(0, lambda err=err: self._process_error(err))
         
         threading.Thread(target=_run, daemon=True).start()
     
@@ -875,7 +878,10 @@ Developed with PyTorch and Tkinter"""
                 has_normalizer = self.app.denoiser.normalizer is not None
                 self.after(0, lambda: self._load_complete(has_normalizer))
             except Exception as e:
-                self.after(0, lambda: self._load_error(str(e)))
+                # NOTE: On Python 3.11+, exception variables are cleared after the except block.
+                # Capture the message eagerly so the deferred callback won't crash with NameError.
+                err = str(e)
+                self.after(0, lambda err=err: self._load_error(err))
         
         threading.Thread(target=_load, daemon=True).start()
     
