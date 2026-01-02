@@ -14,6 +14,21 @@ from typing import List, Optional, Dict
 import re
 
 
+def _apply_complex_mask_2ch(input_stft: torch.Tensor, mask_2ch: torch.Tensor) -> torch.Tensor:
+    """
+    Apply a complex mask to a complex STFT represented as 2 channels.
+
+    Both tensors are shaped [B, 2, F, T] where channel 0 is real and channel 1 is imag.
+    Complex multiplication:
+      (xr + j xi) * (mr + j mi) = (xr*mr - xi*mi) + j(xr*mi + xi*mr)
+    """
+    xr, xi = input_stft[:, 0], input_stft[:, 1]
+    mr, mi = mask_2ch[:, 0], mask_2ch[:, 1]
+    yr = xr * mr - xi * mi
+    yi = xr * mi + xi * mr
+    return torch.stack([yr, yi], dim=1)
+
+
 class ConvBlock(nn.Module):
     """
     Convolutional block với BatchNorm và activation
@@ -304,15 +319,24 @@ class UNetDenoiser(nn.Module):
             # Ensure mask matches input STFT resolution (freq, time)
             if mask.shape[2:] != input_stft.shape[2:]:
                 mask = F.interpolate(mask, size=input_stft.shape[2:], mode="bilinear", align_corners=False)
-            # Apply mask to both real and imaginary parts
-            output = input_stft * mask
+            # IRM is a magnitude (real-valued) gain; use a single mask shared by real/imag.
+            if mask.shape[1] == 1:
+                mag_mask = mask
+            else:
+                mag_mask = mask.mean(dim=1, keepdim=True)
+            output = input_stft * mag_mask
         elif self.mask_type == 'CRM':
             # Complex Ratio Mask
             mask = self.mask_activation(output)
             # Ensure mask matches input STFT resolution (freq, time)
             if mask.shape[2:] != input_stft.shape[2:]:
                 mask = F.interpolate(mask, size=input_stft.shape[2:], mode="bilinear", align_corners=False)
-            output = input_stft * mask
+            # IMPORTANT: CRM is complex-valued; must use complex multiplication (not per-channel multiply).
+            if mask.shape[1] == 2 and input_stft.shape[1] == 2:
+                output = _apply_complex_mask_2ch(input_stft, mask)
+            else:
+                # Fallback for atypical checkpoints: keep legacy behavior.
+                output = input_stft * mask
         # else: direct output
         
         # Safety: always return same spatial size as input (legacy checkpoints / odd lengths)
@@ -433,7 +457,14 @@ class UNetDenoiserLegacy(nn.Module):
             # Legacy layouts can end up with smaller (freq,time); always match input STFT.
             if mask.shape[2:] != input_stft.shape[2:]:
                 mask = F.interpolate(mask, size=input_stft.shape[2:], mode="bilinear", align_corners=False)
-            output = input_stft * mask
+            if self.mask_type == "IRM":
+                mag_mask = mask if mask.shape[1] == 1 else mask.mean(dim=1, keepdim=True)
+                output = input_stft * mag_mask
+            else:
+                if mask.shape[1] == 2 and input_stft.shape[1] == 2:
+                    output = _apply_complex_mask_2ch(input_stft, mask)
+                else:
+                    output = input_stft * mask
         else:
             # direct output: ensure shape match
             if output.shape[2:] != input_stft.shape[2:]:
@@ -519,7 +550,10 @@ class UNetDenoiserLite(nn.Module):
         # Handle final size mismatch with input
         if mask.shape[2:] != input_stft.shape[2:]:
             mask = F.interpolate(mask, size=input_stft.shape[2:], mode='bilinear', align_corners=True)
-        
+
+        # Treat 2-channel output as a complex mask (CRM-style).
+        if mask.shape[1] == 2 and input_stft.shape[1] == 2:
+            return _apply_complex_mask_2ch(input_stft, mask)
         return input_stft * mask
 
 
