@@ -131,6 +131,11 @@ loss:
   # Perceptual (Mel) loss: Gần với cảm nhận của tai người
   perceptual_weight: 0.2
 
+  # === Anti-musical-noise (giảm "rè"/hạt) ===
+  gain_smooth_weight: 0.02
+  gain_smooth_time_weight: 1.0
+  gain_smooth_freq_weight: 1.0
+
 # Checkpoints and logging
 checkpoint:
   save_dir: "./checkpoints"
