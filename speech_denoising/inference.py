@@ -32,6 +32,7 @@ import subprocess
 import torch
 import numpy as np
 from tqdm import tqdm
+import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -65,6 +66,13 @@ class SpeechDenoiser:
         normalizer_path: Optional[str] = None,
         match_amplitude: bool = True,
         prevent_clipping: bool = True,
+        # Artifact reduction (musical noise / "rè")
+        use_noisy_phase: bool = True,
+        tf_smoothing: int = 0,
+        tf_smoothing_time: int = 5,
+        tf_smoothing_freq: int = 3,
+        spectral_floor: float = 0.02,
+        max_gain: float = 2.0,
         # Default False to support older checkpoints whose module names / shapes differ.
         # Users can set True to enforce an exact architecture match.
         strict_load: bool = False,
@@ -130,6 +138,14 @@ class SpeechDenoiser:
         # Output processing settings
         self.match_amplitude_enabled = match_amplitude
         self.prevent_clipping_enabled = prevent_clipping
+
+        # Artifact reduction settings (STFT-domain post-filter)
+        self.use_noisy_phase = bool(use_noisy_phase)
+        self.tf_smoothing = int(tf_smoothing)
+        self.tf_smoothing_time = int(tf_smoothing_time)
+        self.tf_smoothing_freq = int(tf_smoothing_freq)
+        self.spectral_floor = float(spectral_floor)
+        self.max_gain = float(max_gain)
         
         # Output processor
         self.output_processor = OutputProcessor(
@@ -153,6 +169,13 @@ class SpeechDenoiser:
         
         print(f"Model loaded on {self.device}")
         print(f"Output processing: match_amplitude={match_amplitude}, prevent_clipping={prevent_clipping}")
+        print(
+            "Artifact reduction: "
+            f"use_noisy_phase={self.use_noisy_phase}, "
+            f"tf_smoothing={'on' if self.tf_smoothing > 0 else 'off'} "
+            f"(time={self.tf_smoothing_time}, freq={self.tf_smoothing_freq}), "
+            f"spectral_floor={self.spectral_floor}, max_gain={self.max_gain}"
+        )
     
     def _load_model(self, checkpoint_path: str) -> torch.nn.Module:
         """Load model from checkpoint with automatic format conversion"""
@@ -164,6 +187,54 @@ class SpeechDenoiser:
             progress=self._progress,
         )
         return model
+
+    @staticmethod
+    def _mag_phase_from_stft_2ch(stft_2ch: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        real = stft_2ch[:, 0]
+        imag = stft_2ch[:, 1]
+        mag = torch.sqrt(real * real + imag * imag + 1e-8)
+        phase = torch.atan2(imag, real)
+        return mag, phase
+
+    def _apply_tf_smoothing(self, x: torch.Tensor) -> torch.Tensor:
+        if self.tf_smoothing <= 0:
+            return x
+
+        k_t = max(1, int(self.tf_smoothing_time))
+        k_f = max(1, int(self.tf_smoothing_freq))
+        if k_t % 2 == 0:
+            k_t += 1
+        if k_f % 2 == 0:
+            k_f += 1
+
+        pad_t = k_t // 2
+        pad_f = k_f // 2
+
+        x_log = torch.log(x.clamp(min=1e-8))
+        x_log = F.avg_pool2d(x_log, kernel_size=(k_f, k_t), stride=1, padding=(pad_f, pad_t))
+        return torch.exp(x_log)
+
+    def _postprocess_enhanced_stft(self, enhanced_stft: torch.Tensor, noisy_stft: torch.Tensor) -> torch.Tensor:
+        mag_n, phase_n = self._mag_phase_from_stft_2ch(noisy_stft)
+        mag_e, phase_e = self._mag_phase_from_stft_2ch(enhanced_stft)
+
+        gain = mag_e / (mag_n + 1e-8)
+        gain = gain.unsqueeze(1)  # [B, 1, F, T]
+
+        floor = max(0.0, float(self.spectral_floor))
+        max_g = float(self.max_gain)
+        if max_g > 0:
+            gain = gain.clamp(min=floor, max=max_g)
+        else:
+            gain = gain.clamp(min=floor)
+
+        gain = self._apply_tf_smoothing(gain)
+        mag_out = (gain.squeeze(1) * mag_n).clamp(min=0.0)
+
+        phase = phase_n if self.use_noisy_phase else phase_e
+        real = mag_out * torch.cos(phase)
+        imag = mag_out * torch.sin(phase)
+        return torch.stack([real, imag], dim=1)
 
     @staticmethod
     def _probe_cuda_ok(timeout_s: float = 10.0) -> bool:
@@ -224,6 +295,9 @@ class SpeechDenoiser:
         
         # Run model
         enhanced_stft = self.model(stft)
+
+        # Post-filter to reduce "rè"/musical noise artifacts
+        enhanced_stft = self._postprocess_enhanced_stft(enhanced_stft, stft)
         
         # Convert back to waveform
         enhanced_stft = enhanced_stft.permute(0, 2, 3, 1)  # [batch, freq, time, 2]
@@ -497,6 +571,22 @@ def main():
                         help='Prevent output from clipping')
     parser.add_argument('--verbose', '-v', action='store_true',
                         help='Print detailed statistics')
+
+    # Artifact reduction options (musical noise / "rè")
+    parser.add_argument('--use_noisy_phase', action='store_true', default=True,
+                        help='Reconstruct using input/noisy phase (often reduces artifacts)')
+    parser.add_argument('--use_enhanced_phase', action='store_false', dest='use_noisy_phase',
+                        help='Use model output phase (can sound sharper but may add artifacts)')
+    parser.add_argument('--tf_smoothing', type=int, default=0,
+                        help='Enable time-freq smoothing of gain (0=off, 1=on)')
+    parser.add_argument('--tf_smoothing_time', type=int, default=5,
+                        help='Time smoothing kernel size (odd recommended, e.g. 5)')
+    parser.add_argument('--tf_smoothing_freq', type=int, default=3,
+                        help='Freq smoothing kernel size (odd recommended, e.g. 3)')
+    parser.add_argument('--spectral_floor', type=float, default=0.02,
+                        help='Minimum gain relative to noisy magnitude (prevents musical noise)')
+    parser.add_argument('--max_gain', type=float, default=2.0,
+                        help='Maximum gain relative to noisy magnitude (prevents overshoot)')
     
     args = parser.parse_args()
     
@@ -520,7 +610,13 @@ def main():
         device=args.device,
         normalizer_path=args.normalizer_path,
         match_amplitude=args.match_amplitude,
-        prevent_clipping=args.prevent_clipping
+        prevent_clipping=args.prevent_clipping,
+        use_noisy_phase=args.use_noisy_phase,
+        tf_smoothing=args.tf_smoothing,
+        tf_smoothing_time=args.tf_smoothing_time,
+        tf_smoothing_freq=args.tf_smoothing_freq,
+        spectral_floor=args.spectral_floor,
+        max_gain=args.max_gain,
     )
     
     # Process
