@@ -98,6 +98,10 @@ class Trainer:
             time_l1_weight=loss_cfg.get('time_l1_weight', 0.3),
             # Regularization - ngăn giảm volume quá nhiều
             energy_weight=loss_cfg.get('energy_weight', 0.1),
+            # Anti-musical-noise (gain smoothness)
+            gain_smooth_weight=loss_cfg.get('gain_smooth_weight', 0.0),
+            gain_smooth_time_weight=loss_cfg.get('gain_smooth_time_weight', 1.0),
+            gain_smooth_freq_weight=loss_cfg.get('gain_smooth_freq_weight', 1.0),
             # STFT params
             use_mr_stft=True,
             n_fft=stft_cfg.get('n_fft', 512),
@@ -191,8 +195,11 @@ class Trainer:
                     clean_wav_trimmed = clean_wav[..., :min_len]
                     
                     losses = self.criterion(
-                        pred_stft, clean_stft,
-                        pred_wav, clean_wav_trimmed
+                        pred_stft=pred_stft,
+                        target_stft=clean_stft,
+                        pred_waveform=pred_wav,
+                        target_waveform=clean_wav_trimmed,
+                        noisy_stft=noisy_stft,
                     )
                 
                 # Backward pass with gradient scaling
@@ -216,8 +223,11 @@ class Trainer:
                 clean_wav_trimmed = clean_wav[..., :min_len]
                 
                 losses = self.criterion(
-                    pred_stft, clean_stft,
-                    pred_wav, clean_wav_trimmed
+                    pred_stft=pred_stft,
+                    target_stft=clean_stft,
+                    pred_waveform=pred_wav,
+                    target_waveform=clean_wav_trimmed,
+                    noisy_stft=noisy_stft,
                 )
                 
                 losses['total_loss'].backward()
@@ -296,8 +306,11 @@ class Trainer:
             
             # Calculate losses - bao gồm time domain losses
             losses = self.criterion(
-                pred_stft, clean_stft,
-                pred_wav, clean_wav_trimmed
+                pred_stft=pred_stft,
+                target_stft=clean_stft,
+                pred_waveform=pred_wav,
+                target_waveform=clean_wav_trimmed,
+                noisy_stft=noisy_stft,
             )
             
             for key in val_losses:

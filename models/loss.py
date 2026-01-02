@@ -237,6 +237,11 @@ class DenoiserLoss(nn.Module):
         
         # Regularization losses
         energy_weight: float = 0.1,       # Energy conservation
+
+        # Anti-musical-noise regularization (gain smoothness in TF)
+        gain_smooth_weight: float = 0.0,
+        gain_smooth_time_weight: float = 1.0,
+        gain_smooth_freq_weight: float = 1.0,
         
         use_mr_stft: bool = True,
         n_fft: int = 512,
@@ -252,6 +257,9 @@ class DenoiserLoss(nn.Module):
         self.si_sdr_weight = si_sdr_weight
         self.time_l1_weight = time_l1_weight
         self.energy_weight = energy_weight
+        self.gain_smooth_weight = gain_smooth_weight
+        self.gain_smooth_time_weight = gain_smooth_time_weight
+        self.gain_smooth_freq_weight = gain_smooth_freq_weight
         self.use_mr_stft = use_mr_stft
         
         # STFT domain losses
@@ -276,6 +284,24 @@ class DenoiserLoss(nn.Module):
         self.hop_length = hop_length
         self.win_length = win_length
         self.register_buffer('window', torch.hann_window(win_length))
+
+    @staticmethod
+    def _magnitude_from_stft(stft: torch.Tensor) -> torch.Tensor:
+        # stft: [B, 2, F, T] -> mag: [B, F, T]
+        return torch.sqrt(stft[:, 0] ** 2 + stft[:, 1] ** 2 + 1e-8)
+
+    @staticmethod
+    def _tv_smoothness_2d(x: torch.Tensor, w_t: float = 1.0, w_f: float = 1.0) -> torch.Tensor:
+        """
+        Total-variation style smoothness loss over (freq,time).
+        x: [B, F, T]
+        """
+        loss = x.new_zeros(())
+        if w_t > 0:
+            loss = loss + float(w_t) * torch.mean(torch.abs(x[:, :, 1:] - x[:, :, :-1]))
+        if w_f > 0:
+            loss = loss + float(w_f) * torch.mean(torch.abs(x[:, 1:, :] - x[:, :-1, :]))
+        return loss
     
     def _istft(self, stft: torch.Tensor) -> torch.Tensor:
         """Convert STFT to waveform"""
@@ -299,7 +325,8 @@ class DenoiserLoss(nn.Module):
         target_stft: torch.Tensor,
         pred_waveform: Optional[torch.Tensor] = None,
         target_waveform: Optional[torch.Tensor] = None,
-        noisy_waveform: Optional[torch.Tensor] = None  # Thêm để tính noise awareness
+        noisy_waveform: Optional[torch.Tensor] = None,  # Legacy (unused)
+        noisy_stft: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
@@ -351,6 +378,20 @@ class DenoiserLoss(nn.Module):
                 energy_l = self.energy_loss(pred_waveform, target_waveform)
                 losses['energy_loss'] = energy_l
                 total += self.energy_weight * energy_l
+
+        # ===== Anti-musical-noise regularization (TF smoothness on log-gain) =====
+        if self.gain_smooth_weight > 0 and noisy_stft is not None:
+            mag_p = self._magnitude_from_stft(pred_stft)
+            mag_n = self._magnitude_from_stft(noisy_stft)
+            gain = mag_p / (mag_n + 1e-8)
+            log_gain = torch.log(gain.clamp(min=1e-5))
+            smooth_l = self._tv_smoothness_2d(
+                log_gain,
+                w_t=self.gain_smooth_time_weight,
+                w_f=self.gain_smooth_freq_weight,
+            )
+            losses["gain_smooth_loss"] = smooth_l
+            total += self.gain_smooth_weight * smooth_l
         
         losses['total_loss'] = total
         

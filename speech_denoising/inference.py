@@ -577,7 +577,7 @@ def main():
                         help='Reconstruct using input/noisy phase (often reduces artifacts)')
     parser.add_argument('--use_enhanced_phase', action='store_false', dest='use_noisy_phase',
                         help='Use model output phase (can sound sharper but may add artifacts)')
-    parser.add_argument('--tf_smoothing', type=int, default=0,
+    parser.add_argument('--tf_smoothing', type=int, default=1,
                         help='Enable time-freq smoothing of gain (0=off, 1=on)')
     parser.add_argument('--tf_smoothing_time', type=int, default=5,
                         help='Time smoothing kernel size (odd recommended, e.g. 5)')

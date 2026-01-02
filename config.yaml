@@ -134,6 +134,16 @@ loss:
   # Perceptual (Mel) loss: Gần với cảm nhận của tai người
   perceptual_weight: 0.2
 
+  # === Anti-musical-noise (giảm "rè"/hạt) ===
+  # Ý tưởng: musical noise thường đến từ gain/mask thay đổi "lỗ chỗ" theo time-freq.
+  # Ta phạt tổng biến thiên (TV) của log-gain = log(|pred|/|noisy|) để gain mượt hơn.
+  # Gợi ý:
+  # - Nếu còn rè: tăng gain_smooth_weight lên 0.02~0.05
+  # - Nếu bị "đục": giảm về 0.005~0.01 hoặc giảm time/freq weights
+  gain_smooth_weight: 0.02
+  gain_smooth_time_weight: 1.0
+  gain_smooth_freq_weight: 1.0
+
 # Checkpoints and logging
 checkpoint:
   save_dir: "./checkpoints"
